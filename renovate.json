@@ -17,6 +17,14 @@
   },
   "customManagers": [
     {
+      "description": "govulncheck's version in the workflows.",
+      "customType": "regex",
+      "managerFilePatterns": ["/^\\.github/workflows/(ci|govulncheck)\\.yml$/"],
+      "matchStrings": ["golang\\.org/x/vuln/cmd/govulncheck@(?<currentValue>v\\S+)"],
+      "depNameTemplate": "golang.org/x/vuln",
+      "datasourceTemplate": "go"
+    },
+    {
       "description": "golangci-lint's version in CI, kept the same as the dev container's.",
       "customType": "regex",
       "managerFilePatterns": ["/^\\.github/workflows/ci\\.yml$/"],
@@ -51,9 +59,19 @@
     },
     {
       "description": "Each release is built against exactly one CAPI minor (see the support matrix in the README), so a new CAPI minor is raised by hand, as its own release; only its patch releases come from here.",
-      "matchPackageNames": ["sigs.k8s.io/cluster-api"],
+      "matchPackageNames": ["sigs.k8s.io/cluster-api", "sigs.k8s.io/cluster-api/api"],
       "matchUpdateTypes": ["major", "minor"],
       "enabled": false
+    },
+    {
+      "description": "Helm follows its newest minor, the only one it patches, and the Kubernetes libraries go where it requires (docs/adr/0001-core-libraries.md). They move together, and a minor merges only once the smoke test in CI passes on it. Kept out of the binary group so a break is isolated.",
+      "matchPackageNames": ["helm.sh/helm/v4", "k8s.io/**", "sigs.k8s.io/controller-runtime"],
+      "groupName": "kubernetes-libraries"
+    },
+    {
+      "description": "CAPI and the replace of its api module move together (docs/adr/0001-core-libraries.md).",
+      "matchPackageNames": ["sigs.k8s.io/cluster-api", "sigs.k8s.io/cluster-api/api"],
+      "groupName": "cluster-api"
     },
     {
       "description": "A new Go minor version is raised by hand, in go.mod and the dev container together; only its patch releases and digests come from here.",
