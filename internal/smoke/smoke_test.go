@@ -36,13 +36,15 @@ import (
 	clusterctlv1 "sigs.k8s.io/cluster-api/cmd/clusterctl/api/v1alpha3"
 	clusterctlclient "sigs.k8s.io/cluster-api/cmd/clusterctl/client"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/klconsultancy/selfhostctl/internal/bootstrap"
 )
 
 const (
 	// The core version this release line is built against (the support matrix).
 	capiVersion = "v1.14.4"
-	// The Bootstrap cluster's k0s, pinned per tool release like the core.
-	bootstrapImage = "docker.io/k0sproject/k0s:v1.36.5-k0s.0"
+	// The Bootstrap cluster's k0s, the one the tool pins.
+	bootstrapImage = bootstrap.Image
 )
 
 func TestLibrariesTogether(t *testing.T) {

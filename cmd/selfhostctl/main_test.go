@@ -2,32 +2,80 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/klconsultancy/selfhostctl/internal/config"
+	"github.com/klconsultancy/selfhostctl/internal/phase"
 )
 
+// stub is a phase with a fixed status; Run makes it done.
+type stub struct {
+	name string
+	st   phase.Status
+}
+
+func (s *stub) Name() string                                 { return s.name }
+func (s *stub) Status(context.Context) (phase.Status, error) { return s.st, nil }
+func (s *stub) Run(context.Context) error                    { s.st = phase.Status{State: phase.Done}; return nil }
+
+func testApp(st phase.Status) app {
+	return app{
+		lookupEnv: func(string) (string, bool) { return "", false },
+		phases: func(*config.ManagementCluster) ([]phase.Phase, func(), error) {
+			return []phase.Phase{&stub{name: "bootstrap-cluster", st: st}}, func() {}, nil
+		},
+	}
+}
+
+func configFile(t *testing.T, content string) string {
+	t.Helper()
+	f := filepath.Join(t.TempDir(), "management.yaml")
+	if err := os.WriteFile(f, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+const validConfig = "apiVersion: selfhostctl/v1alpha1\nkind: ManagementCluster\nmetadata:\n  name: management\n"
+
 func TestRun(t *testing.T) {
+	cfg := configFile(t, validConfig)
+	bad := configFile(t, validConfig+"kindConfig: kind.yaml\n")
 	tests := []struct {
 		name       string
 		args       []string
+		st         phase.Status
 		wantCode   int
 		wantStdout string
+		wantStderr string
 	}{
-		{name: "version", args: []string{"version"}, wantCode: 0, wantStdout: "dev\n"},
-		{name: "--version", args: []string{"--version"}, wantCode: 0, wantStdout: "dev\n"},
-		{name: "no arguments", args: nil, wantCode: 2},
-		{name: "unknown command", args: []string{"bootstrap"}, wantCode: 2},
+		{name: "version", args: []string{"version"}, wantStdout: "dev\n"},
+		{name: "--version", args: []string{"--version"}, wantStdout: "dev\n"},
+		{name: "no command", args: nil, wantCode: exitUsage, wantStderr: "a command is required"},
+		{name: "unknown command", args: []string{"pivot-now"}, wantCode: exitUsage},
+		{name: "no config", args: []string{"bootstrap"}, wantCode: exitUsage, wantStderr: "--config/-f is required"},
+		{name: "invalid config", args: []string{"bootstrap", "-f", bad}, wantCode: exitUsage, wantStderr: `unknown field "kindConfig"`},
+		{name: "bootstrap runs", args: []string{"bootstrap", "-f", cfg}, st: phase.Status{State: phase.Next}, wantStdout: "bootstrap-cluster: running\nbootstrap-cluster: done\n"},
+		{name: "bootstrap blocked", args: []string{"bootstrap", "-f", cfg}, st: phase.Status{State: phase.Blocked, Reason: "no Docker"}, wantCode: exitBlocked, wantStderr: "blocked: no Docker"},
+		{name: "manual checkpoint", args: []string{"bootstrap", "-f", cfg}, st: phase.Status{State: phase.Manual, Reason: "add the deploy key"}, wantCode: exitCheckpoint, wantStderr: "manual checkpoint: add the deploy key"},
+		{name: "unknown --from", args: []string{"bootstrap", "-f", cfg, "--from", "pivot"}, wantCode: exitUsage, wantStderr: `no phase "pivot"`},
+		{name: "status", args: []string{"status", "-f", cfg}, st: phase.Status{State: phase.Next}, wantStdout: "bootstrap-cluster    NEXT\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			if got := run(tt.args, &stdout, &stderr); got != tt.wantCode {
-				t.Errorf("exit code = %d, want %d", got, tt.wantCode)
+			if got := run(t.Context(), tt.args, &stdout, &stderr, testApp(tt.st)); got != tt.wantCode {
+				t.Errorf("exit code = %d, want %d (stderr: %s)", got, tt.wantCode, stderr.String())
 			}
-			if got := stdout.String(); got != tt.wantStdout {
-				t.Errorf("stdout = %q, want %q", got, tt.wantStdout)
+			if tt.wantStdout != "" && stdout.String() != tt.wantStdout {
+				t.Errorf("stdout = %q, want %q", stdout.String(), tt.wantStdout)
 			}
-			if tt.wantCode != 0 && stderr.Len() == 0 {
-				t.Error("no usage on stderr")
+			if !strings.Contains(stderr.String(), tt.wantStderr) {
+				t.Errorf("stderr = %q, want it to contain %q", stderr.String(), tt.wantStderr)
 			}
 		})
 	}

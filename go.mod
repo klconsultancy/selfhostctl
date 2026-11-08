@@ -3,14 +3,18 @@ module github.com/klconsultancy/selfhostctl
 go 1.27
 
 require (
+	github.com/containerd/errdefs v1.0.0
+	github.com/go-logr/logr v1.4.4
 	github.com/moby/moby/api v1.56.1
 	github.com/moby/moby/client v0.6.2
+	github.com/spf13/cobra v1.10.2
 	helm.sh/helm/v4 v4.3.1
 	k8s.io/api v0.37.1
 	k8s.io/apimachinery v0.37.1
 	k8s.io/client-go v0.37.1
 	sigs.k8s.io/cluster-api v1.14.4
 	sigs.k8s.io/controller-runtime v0.25.2
+	sigs.k8s.io/yaml v1.6.0
 )
 
 require (
@@ -32,7 +36,6 @@ require (
 	github.com/chai2010/gettext-go v1.0.2 // indirect
 	github.com/clipperhouse/uax29/v2 v2.6.0 // indirect
 	github.com/cloudflare/circl v1.6.3 // indirect
-	github.com/containerd/errdefs v1.0.0 // indirect
 	github.com/containerd/errdefs/pkg v0.3.0 // indirect
 	github.com/cyphar/filepath-securejoin v0.7.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
@@ -52,7 +55,6 @@ require (
 	github.com/fxamacker/cbor/v2 v2.9.1 // indirect
 	github.com/go-errors/errors v1.5.1 // indirect
 	github.com/go-gorp/gorp/v3 v3.1.0 // indirect
-	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-openapi/jsonpointer v1.0.0 // indirect
 	github.com/go-openapi/jsonreference v1.0.0 // indirect
@@ -119,7 +121,6 @@ require (
 	github.com/sourcegraph/conc v0.3.1-0.20240121214520-5f936abd7ae8 // indirect
 	github.com/spf13/afero v1.15.0 // indirect
 	github.com/spf13/cast v1.10.0 // indirect
-	github.com/spf13/cobra v1.10.2 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/spf13/viper v1.21.0 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
@@ -163,7 +164,6 @@ require (
 	sigs.k8s.io/kustomize/kyaml v0.21.2 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect
 	sigs.k8s.io/structured-merge-diff/v6 v6.4.2 // indirect
-	sigs.k8s.io/yaml v1.6.0 // indirect
 )
 
 replace sigs.k8s.io/cluster-api/api => sigs.k8s.io/cluster-api/api v1.14.4
