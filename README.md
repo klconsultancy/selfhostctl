@@ -10,7 +10,7 @@
 
 One Go binary for the lifecycle of a self-managed [Cluster API](https://cluster-api.sigs.k8s.io) management cluster: bootstrap through a kind **Bootstrap cluster**, pivot, provider upgrade, recovery and status, driven by one declarative config file.
 
-> **Status: early development.** `bootstrap` creates the Bootstrap cluster and nothing more yet. The design is the [PRD](https://github.com/klconsultancy/selfhostctl/issues/1). See [the command line](docs/cli.md) and [the config](docs/config.md).
+> **Status: early development.** `bootstrap` brings a Management cluster up in its Bootstrap cluster and secures its Recovery bundle; the pivot comes next. The design is the [PRD](https://github.com/klconsultancy/selfhostctl/issues/1). See [the command line](docs/cli.md) and [the config](docs/config.md).
 
 ## Scope
 

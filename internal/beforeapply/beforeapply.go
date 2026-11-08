@@ -24,20 +24,14 @@ import (
 	"helm.sh/helm/v4/pkg/registry"
 	"helm.sh/helm/v4/pkg/release"
 	"helm.sh/helm/v4/pkg/storage/driver"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
-	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
 
+	"github.com/klconsultancy/selfhostctl/internal/apply"
 	"github.com/klconsultancy/selfhostctl/internal/config"
 	"github.com/klconsultancy/selfhostctl/internal/envsubst"
 	selfkube "github.com/klconsultancy/selfhostctl/internal/kube"
 )
-
-// FieldManager owns what the tool applies server-side.
-const FieldManager = "selfhostctl"
 
 // State of one prerequisite on one cluster.
 type State struct {
@@ -92,34 +86,21 @@ func (a Applier) expandFile(name string) (string, []string, error) {
 
 // --- manifests ---
 
-func (a Applier) objects(m *config.Manifest) ([]*unstructured.Unstructured, []string, error) {
+func (a Applier) objects(m *config.Manifest) ([]*unstructured.Unstructured, apply.Redactor, error) {
 	text, values, err := a.expandFile(m.Path)
 	if err != nil {
 		return nil, nil, err
 	}
-	dec := utilyaml.NewYAMLOrJSONDecoder(strings.NewReader(text), 4096)
-	var objs []*unstructured.Unstructured
-	for {
-		var raw map[string]any
-		if err := dec.Decode(&raw); errors.Is(err, io.EOF) {
-			break
-		} else if err != nil {
-			return nil, values, redacted(values, "%s: %v", m.Path, err)
-		}
-		if len(raw) == 0 {
-			continue // an empty document
-		}
-		u := &unstructured.Unstructured{Object: raw}
-		if u.GetAPIVersion() == "" || u.GetKind() == "" || u.GetName() == "" {
-			return nil, values, fmt.Errorf("%s: every object needs apiVersion, kind and metadata.name", m.Path)
-		}
-		objs = append(objs, u)
+	redact := func(s string) string { return envsubst.Redact(s, values) }
+	objs, err := apply.Decode(strings.NewReader(text), redact)
+	if err != nil {
+		return nil, redact, fmt.Errorf("%s: %w", m.Path, err)
 	}
-	return objs, values, nil
+	return objs, redact, nil
 }
 
 func (a Applier) manifestState(ctx context.Context, kubeconfig []byte, m *config.Manifest) (State, error) {
-	objs, values, err := a.objects(m)
+	objs, redact, err := a.objects(m)
 	if err != nil {
 		return State{}, err
 	}
@@ -127,31 +108,15 @@ func (a Applier) manifestState(ctx context.Context, kubeconfig []byte, m *config
 	if err != nil {
 		return State{}, err
 	}
-	for _, obj := range objs {
-		live := &unstructured.Unstructured{}
-		live.SetGroupVersionKind(obj.GroupVersionKind())
-		err := c.Get(ctx, ctrlclient.ObjectKeyFromObject(obj), live)
-		if apierrors.IsNotFound(err) || isNoMatch(err) {
-			return State{}, nil
-		}
-		if err != nil {
-			return State{}, redacted(values, "%s: %v", m.Path, err)
-		}
-		// A dry-run apply that would change nothing keeps the resourceVersion.
-		dry := obj.DeepCopy()
-		if err := c.Apply(ctx, ctrlclient.ApplyConfigurationFromUnstructured(dry),
-			ctrlclient.FieldOwner(FieldManager), ctrlclient.ForceOwnership, ctrlclient.DryRunAll); err != nil {
-			return State{}, redacted(values, "%s: %s %s: %v", m.Path, obj.GetKind(), obj.GetName(), err)
-		}
-		if dry.GetResourceVersion() != live.GetResourceVersion() {
-			return State{}, nil
-		}
+	done, err := apply.InPlace(ctx, c, objs, redact)
+	if err != nil {
+		return State{}, fmt.Errorf("%s: %w", m.Path, err)
 	}
-	return State{Done: true}, nil
+	return State{Done: done}, nil
 }
 
 func (a Applier) applyManifest(ctx context.Context, kubeconfig []byte, m *config.Manifest) error {
-	objs, values, err := a.objects(m)
+	objs, redact, err := a.objects(m)
 	if err != nil {
 		return err
 	}
@@ -159,11 +124,8 @@ func (a Applier) applyManifest(ctx context.Context, kubeconfig []byte, m *config
 	if err != nil {
 		return err
 	}
-	for _, obj := range objs {
-		if err := c.Apply(ctx, ctrlclient.ApplyConfigurationFromUnstructured(obj.DeepCopy()),
-			ctrlclient.FieldOwner(FieldManager), ctrlclient.ForceOwnership); err != nil {
-			return redacted(values, "%s: %s %s: %v", m.Path, obj.GetKind(), obj.GetName(), err)
-		}
+	if err := apply.Objects(ctx, c, objs, redact); err != nil {
+		return fmt.Errorf("%s: %w", m.Path, err)
 	}
 	return nil
 }
@@ -173,8 +135,6 @@ func (a Applier) applyManifest(ctx context.Context, kubeconfig []byte, m *config
 func redacted(values []string, format string, args ...any) error {
 	return errors.New(envsubst.Redact(fmt.Sprintf(format, args...), values))
 }
-
-func isNoMatch(err error) bool { return meta.IsNoMatchError(err) }
 
 // --- Helm ---
 

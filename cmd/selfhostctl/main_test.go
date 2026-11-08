@@ -28,19 +28,27 @@ func testApp(st phase.Status) app {
 		phases: func(*config.ManagementCluster) ([]phase.Phase, func(), error) {
 			return []phase.Phase{&stub{name: "bootstrap-cluster", st: st}}, func() {}, nil
 		},
+		exportBundle: func(context.Context, *config.ManagementCluster) ([]byte, error) {
+			return []byte("{\"kind\": \"RecoveryBundle\"}\n"), nil
+		},
 	}
 }
 
 func configFile(t *testing.T, content string) string {
 	t.Helper()
-	f := filepath.Join(t.TempDir(), "management.yaml")
+	dir := t.TempDir()
+	f := filepath.Join(dir, "management.yaml")
 	if err := os.WriteFile(f, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The cluster.manifests the configs name.
+	if err := os.WriteFile(filepath.Join(dir, "cluster.yaml"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return f
 }
 
-const validConfig = "apiVersion: selfhostctl/v1alpha1\nkind: ManagementCluster\nmetadata:\n  name: management\nproviders:\n  bootstrap: [{name: k0sproject-k0smotron, version: v2.3.0}]\n  controlPlane: [{name: k0sproject-k0smotron, version: v2.3.0}]\n  infrastructure: [{name: docker, version: v1.14.4}]\n"
+const validConfig = "apiVersion: selfhostctl/v1alpha1\nkind: ManagementCluster\nmetadata:\n  name: management\nproviders:\n  bootstrap: [{name: k0sproject-k0smotron, version: v2.3.0}]\n  controlPlane: [{name: k0sproject-k0smotron, version: v2.3.0}]\n  infrastructure: [{name: docker, version: v1.14.4}]\ncluster:\n  manifests: cluster.yaml\n  namespace: mgmt\n"
 
 func TestRun(t *testing.T) {
 	cfg := configFile(t, validConfig)
@@ -63,6 +71,7 @@ func TestRun(t *testing.T) {
 		{name: "bootstrap blocked", args: []string{"bootstrap", "-f", cfg}, st: phase.Status{State: phase.Blocked, Reason: "no Docker"}, wantCode: exitBlocked, wantStderr: "blocked: no Docker"},
 		{name: "manual checkpoint", args: []string{"bootstrap", "-f", cfg}, st: phase.Status{State: phase.Manual, Reason: "add the deploy key"}, wantCode: exitCheckpoint, wantStderr: "manual checkpoint: add the deploy key"},
 		{name: "unknown --from", args: []string{"bootstrap", "-f", cfg, "--from", "pivot"}, wantCode: exitUsage, wantStderr: `no phase "pivot"`},
+		{name: "recovery export", args: []string{"recovery", "export", "-f", cfg}, wantStdout: "{\"kind\": \"RecoveryBundle\"}\n"},
 		{name: "status", args: []string{"status", "-f", cfg}, st: phase.Status{State: phase.Next}, wantStdout: "bootstrap-cluster    NEXT\n"},
 	}
 	for _, tt := range tests {

@@ -22,6 +22,7 @@ import (
 	"github.com/klconsultancy/selfhostctl/internal/dockerhost"
 	"github.com/klconsultancy/selfhostctl/internal/phase"
 	"github.com/klconsultancy/selfhostctl/internal/providers"
+	"github.com/klconsultancy/selfhostctl/internal/recovery"
 )
 
 // version is set at release time with -ldflags "-X main.version=<tag>".
@@ -50,6 +51,8 @@ type app struct {
 	lookupEnv func(string) (string, bool)
 	// phases returns bootstrap's phases for a config.
 	phases func(cfg *config.ManagementCluster) ([]phase.Phase, func(), error)
+	// exportBundle reads the Recovery bundle from wherever the cluster's objects are.
+	exportBundle func(ctx context.Context, cfg *config.ManagementCluster) ([]byte, error)
 }
 
 func liveApp() app {
@@ -69,6 +72,26 @@ func liveApp() app {
 				Prerequisites: beforeapply.Applier{Config: cfg, Lookup: os.LookupEnv},
 			}
 			return bootstrap.Phases(cfg, deps), func() { _ = docker.Close() }, nil
+		},
+		exportBundle: func(ctx context.Context, cfg *config.ManagementCluster) ([]byte, error) {
+			docker, err := dockerhost.New(dockerhost.OS)
+			if err != nil {
+				return nil, err
+			}
+			defer func() { _ = docker.Close() }()
+			kc, err := bootstrap.BootstrapCluster(cfg, docker).Kubeconfig(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("the Bootstrap cluster holds the cluster's objects until the pivot, and isn't reachable: %w", err)
+			}
+			c, err := bootstrap.LiveClients(kc)
+			if err != nil {
+				return nil, err
+			}
+			b, err := recovery.Export(ctx, c, cfg.Cluster.Namespace, cfg.ClusterName())
+			if err != nil {
+				return nil, err
+			}
+			return b.JSON()
 		},
 	}
 }
@@ -178,6 +201,29 @@ func newRoot(a app, stdout io.Writer) *cobra.Command {
 	}
 	bootstrapCmd.Flags().StringVar(&from, "from", "", "start at this phase, skipping the ones before it")
 	root.AddCommand(bootstrapCmd)
+
+	recoveryCmd := &cobra.Command{Use: "recovery", Short: "The Recovery bundle", Args: cobra.NoArgs}
+	recoveryCmd.AddCommand(&cobra.Command{
+		Use:   "export",
+		Short: "Write the Recovery bundle to stdout, for your secret store",
+		Long: "Writes the Recovery bundle (the cluster's CA, service-account key, front-proxy CA and\n" +
+			"control-plane endpoint) to stdout as JSON. It is secret: pipe it into your secret store,\n" +
+			"never into a file in git.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg, err := load()
+			if err != nil {
+				return classify(err)
+			}
+			data, err := a.exportBundle(cmd.Context(), cfg)
+			if err != nil {
+				return classify(err)
+			}
+			_, err = stdout.Write(data)
+			return classify(err)
+		},
+	})
+	root.AddCommand(recoveryCmd)
 
 	root.AddCommand(&cobra.Command{
 		Use:   "status",

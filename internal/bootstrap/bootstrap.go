@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/klconsultancy/selfhostctl/internal/config"
@@ -43,6 +44,12 @@ type Deps struct {
 	Providers providers.Installer
 	// Prerequisites judges and installs the beforeApply entries.
 	Prerequisites Prerequisites
+	// Clients turns a kubeconfig into a client; LiveClients when nil.
+	Clients Clients
+	// Lookup reads the environment; os.LookupEnv when nil.
+	Lookup func(string) (string, bool)
+	// ClusterReadyTimeout bounds the wait for the Management cluster to be ready.
+	ClusterReadyTimeout time.Duration
 }
 
 // LiveNodesReady is Deps.NodesReady against a real cluster.
@@ -56,10 +63,24 @@ func LiveNodesReady(ctx context.Context, kubeconfig []byte) (bool, error) {
 
 // Phases are bootstrap's phases, in order.
 func Phases(cfg *config.ManagementCluster, deps Deps) []phase.Phase {
+	if deps.Clients == nil {
+		deps.Clients = LiveClients
+	}
+	if deps.Lookup == nil {
+		deps.Lookup = os.LookupEnv
+	}
+	if deps.ClusterReadyTimeout == 0 {
+		deps.ClusterReadyTimeout = 30 * time.Minute
+	}
+	cluster := BootstrapCluster(cfg, deps.Docker)
 	return []phase.Phase{
 		newBootstrapClusterPhase(cfg, deps),
 		newProvidersPhase(cfg, deps),
 		newBeforeApplyPhase(cfg, deps),
+		&applyPhase{cfg: cfg, cluster: cluster, clients: deps.Clients},
+		&readyPhase{cfg: cfg, cluster: cluster, clients: deps.Clients, timeout: deps.ClusterReadyTimeout},
+		&recoveryBundlePhase{cfg: cfg, cluster: cluster, clients: deps.Clients, lookup: deps.Lookup},
+		&kubeconfigPhase{cfg: cfg, cluster: cluster, clients: deps.Clients},
 	}
 }
 

@@ -41,6 +41,7 @@ func TestLoadResolvesFilesAndTheirVariables(t *testing.T) {
 	}
 	write("secret.yaml", "stringData:\n  token: ${PROXY_TOKEN}\n  again: ${PROXY_TOKEN}\n")
 	write("values.yaml", "password: ${DB_PASSWORD}\n")
+	write("cluster.yaml", "")
 	write("m.yaml", valid+`beforeApply:
   - manifest: {path: secret.yaml}
     clusters: [bootstrap]

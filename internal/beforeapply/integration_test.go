@@ -69,6 +69,9 @@ providers:
   bootstrap: [{name: k0sproject-k0smotron, version: v2.3.0}]
   controlPlane: [{name: k0sproject-k0smotron, version: v2.3.0}]
   infrastructure: [{name: docker, version: v1.14.4}]
+cluster:
+  manifests: secret.yaml
+  namespace: proxy
 beforeApply:
   - manifest: {path: secret.yaml}
     clusters: [bootstrap]
