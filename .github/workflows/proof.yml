@@ -30,6 +30,12 @@ jobs:
           curl -fsSLo "$HOME/bin/kubectl" https://dl.k8s.io/release/v1.36.4/bin/linux/amd64/kubectl
           chmod +x "$HOME"/bin/*
           echo "$HOME/bin" >>"$GITHUB_PATH"
+      # kind's known-issues values: with kind, k0s machines and break-glass side by side,
+      # the runner's defaults ran out ("too many open files", the second proof run).
+      - name: inotify limits
+        run: |
+          sudo sysctl -w fs.inotify.max_user_watches=524288
+          sudo sysctl -w fs.inotify.max_user_instances=512
       - run: docker info --format '{{.MemTotal}} bytes, {{.NCPU}} CPUs, cgroup {{.CgroupVersion}}'
       - name: Proof
         env:
