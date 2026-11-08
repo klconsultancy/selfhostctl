@@ -25,7 +25,7 @@
       "datasourceTemplate": "go"
     },
     {
-      "description": "The Bootstrap cluster's k0s image, pinned in code per release (docs/adr/0001-core-libraries.md).",
+      "description": "The Bootstrap cluster's k0s image, pinned in code per release (docs/design.md#bootstrap-cluster).",
       "customType": "regex",
       "managerFilePatterns": ["/^internal/bootstrap/bootstrap\\.go$/"],
       "matchStrings": ["Image = \"docker\\.io/k0sproject/k0s:(?<currentValue>v[^\"]+)\""],
@@ -92,12 +92,12 @@
       "enabled": false
     },
     {
-      "description": "Helm follows its newest minor, the only one it patches, and the Kubernetes libraries go where it requires (docs/adr/0001-core-libraries.md). They move together, and a minor merges only once the smoke test in CI passes on it. Kept out of the binary group so a break is isolated.",
+      "description": "Helm follows its newest minor, the only one it patches, and the Kubernetes libraries go where it requires (docs/design.md#libraries). They move together, and a minor merges only once the smoke test in CI passes on it. Kept out of the binary group so a break is isolated.",
       "matchPackageNames": ["helm.sh/helm/v4", "k8s.io/**", "sigs.k8s.io/controller-runtime"],
       "groupName": "kubernetes-libraries"
     },
     {
-      "description": "CAPI and the replace of its api module move together (docs/adr/0001-core-libraries.md).",
+      "description": "CAPI and the replace of its api module move together (docs/design.md#libraries).",
       "matchPackageNames": ["sigs.k8s.io/cluster-api", "sigs.k8s.io/cluster-api/api"],
       "groupName": "cluster-api"
     },

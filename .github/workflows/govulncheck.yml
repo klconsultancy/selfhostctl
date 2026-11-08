@@ -1,7 +1,7 @@
 name: govulncheck
 
 # Daily on main, so an advisory in a dependency that no pull request touches still
-# shows up (docs/adr/0001-core-libraries.md). Pull requests run it in CI.
+# shows up (docs/design.md#libraries). Pull requests run it in CI.
 on:
   schedule:
     - cron: "37 5 * * *"

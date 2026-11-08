@@ -16,7 +16,7 @@ import (
 )
 
 // Image is the Bootstrap cluster's k0s, pinned per tool release like the CAPI core
-// (docs/adr/0001-core-libraries.md).
+// (docs/design.md#bootstrap-cluster).
 const Image = "docker.io/k0sproject/k0s:v1.36.5-k0s.0"
 
 // Labels mark the tool's containers, so they can be told apart from anything else on
