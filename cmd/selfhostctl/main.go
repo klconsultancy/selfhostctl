@@ -49,39 +49,70 @@ func main() {
 // app is what the commands need from the outside world; tests replace it.
 type app struct {
 	lookupEnv func(string) (string, bool)
-	// phases returns bootstrap's phases for a config.
-	phases func(cfg *config.ManagementCluster) ([]phase.Phase, func(), error)
+	// phases returns bootstrap's phases for a config; first is `--first`.
+	phases func(cfg *config.ManagementCluster, first bool) ([]phase.Phase, func(), error)
+	// locate says where the Management cluster's objects live, and why when unknown.
+	locate func(ctx context.Context, cfg *config.ManagementCluster) (string, string, error)
 	// exportBundle reads the Recovery bundle from wherever the cluster's objects are.
 	exportBundle func(ctx context.Context, cfg *config.ManagementCluster) ([]byte, error)
+	// adopt stamps the Management cluster's providers with the config's fingerprint.
+	adopt func(ctx context.Context, cfg *config.ManagementCluster) error
+}
+
+// liveDeps are bootstrap's dependencies on the real world.
+func liveDeps(cfg *config.ManagementCluster, first bool) (bootstrap.Deps, func(), error) {
+	docker, err := dockerhost.New(dockerhost.OS)
+	if err != nil {
+		return bootstrap.Deps{}, nil, err
+	}
+	// The token only lifts clusterctl's GitHub rate limit; nothing else from the
+	// environment reaches clusterctl.
+	cc := providers.Clusterctl{GitHubToken: os.Getenv("GITHUB_TOKEN"), WaitTimeout: 10 * time.Minute}
+	return bootstrap.Deps{
+		Docker:        docker,
+		NodesReady:    bootstrap.LiveNodesReady,
+		Providers:     cc,
+		Mover:         cc,
+		Prerequisites: beforeapply.Applier{Config: cfg, Lookup: os.LookupEnv},
+		First:         first,
+	}, func() { _ = docker.Close() }, nil
 }
 
 func liveApp() app {
 	return app{
 		lookupEnv: os.LookupEnv,
-		phases: func(cfg *config.ManagementCluster) ([]phase.Phase, func(), error) {
-			docker, err := dockerhost.New(dockerhost.OS)
+		phases: func(cfg *config.ManagementCluster, first bool) ([]phase.Phase, func(), error) {
+			deps, done, err := liveDeps(cfg, first)
 			if err != nil {
 				return nil, nil, err
 			}
-			deps := bootstrap.Deps{
-				Docker:     docker,
-				NodesReady: bootstrap.LiveNodesReady,
-				// The token only lifts clusterctl's GitHub rate limit; nothing else from
-				// the environment reaches clusterctl.
-				Providers:     providers.Clusterctl{GitHubToken: os.Getenv("GITHUB_TOKEN"), WaitTimeout: 10 * time.Minute},
-				Prerequisites: beforeapply.Applier{Config: cfg, Lookup: os.LookupEnv},
+			return bootstrap.Phases(cfg, deps), done, nil
+		},
+		locate: func(ctx context.Context, cfg *config.ManagementCluster) (string, string, error) {
+			deps, done, err := liveDeps(cfg, false)
+			if err != nil {
+				return "", "", err
 			}
-			return bootstrap.Phases(cfg, deps), func() { _ = docker.Close() }, nil
+			defer done()
+			s, err := bootstrap.Locate(ctx, cfg, deps)
+			return s.Location.String(), s.Reason, err
 		},
 		exportBundle: func(ctx context.Context, cfg *config.ManagementCluster) ([]byte, error) {
-			docker, err := dockerhost.New(dockerhost.OS)
+			deps, done, err := liveDeps(cfg, false)
 			if err != nil {
 				return nil, err
 			}
-			defer func() { _ = docker.Close() }()
-			kc, err := bootstrap.BootstrapCluster(cfg, docker).Kubeconfig(ctx)
+			defer done()
+			s, err := bootstrap.Locate(ctx, cfg, deps)
 			if err != nil {
-				return nil, fmt.Errorf("the Bootstrap cluster holds the cluster's objects until the pivot, and isn't reachable: %w", err)
+				return nil, err
+			}
+			kc := s.BootstrapKC
+			if s.Location == bootstrap.LocationManagement {
+				kc = s.ManagementKC
+			}
+			if kc == nil {
+				return nil, fmt.Errorf("no cluster holds the Management cluster's objects (location %s)", s.Location)
 			}
 			c, err := bootstrap.LiveClients(kc)
 			if err != nil {
@@ -92,6 +123,22 @@ func liveApp() app {
 				return nil, err
 			}
 			return b.JSON()
+		},
+		adopt: func(ctx context.Context, cfg *config.ManagementCluster) error {
+			path, err := cfg.KubeconfigPath()
+			if err != nil {
+				return err
+			}
+			kc, err := os.ReadFile(path)
+			if err != nil {
+				return fmt.Errorf("the Management cluster's kubeconfig: %w", err)
+			}
+			deps, done, err := liveDeps(cfg, false)
+			if err != nil {
+				return err
+			}
+			defer done()
+			return deps.Providers.(providers.Clusterctl).Adopt(ctx, kc, providers.FromConfig(&cfg.Providers))
 		},
 	}
 }
@@ -181,26 +228,63 @@ func newRoot(a app, stdout io.Writer) *cobra.Command {
 		return cfg, nil
 	}
 
+	runPhases := func(cmd *cobra.Command, from string, first bool) error {
+		cfg, err := load()
+		if err != nil {
+			return classify(err)
+		}
+		phases, done, err := a.phases(cfg, first)
+		if err != nil {
+			return classify(err)
+		}
+		defer done()
+		return classify(phase.Run(cmd.Context(), phases, from, stdout))
+	}
+
 	var from string
+	var first bool
 	bootstrapCmd := &cobra.Command{
 		Use:   "bootstrap",
-		Short: "Bring up the Management cluster through a Bootstrap cluster, phase by phase",
+		Short: "Bring up the Management cluster through a Bootstrap cluster until it manages itself, phase by phase",
 		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runPhases(cmd, from, first)
+		},
+	}
+	bootstrapCmd.Flags().StringVar(&from, "from", "", "start at this phase, skipping the ones before it")
+	bootstrapCmd.Flags().BoolVar(&first, "first", false, "this is the cluster's first bootstrap: no Management cluster exists yet (only needed without its kubeconfig)")
+	root.AddCommand(bootstrapCmd)
+
+	root.AddCommand(&cobra.Command{
+		Use:   "pivot",
+		Short: "bootstrap's phases from " + bootstrap.PivotFrom + ": the Management cluster takes over from the Bootstrap cluster",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runPhases(cmd, bootstrap.PivotFrom, false)
+		},
+	})
+
+	providersCmd := &cobra.Command{Use: "providers", Short: "The Management cluster's Cluster API providers", Args: cobra.NoArgs}
+	providersCmd.AddCommand(&cobra.Command{
+		Use:   "adopt",
+		Short: "Stamp providers selfhostctl didn't install with the config's fingerprint",
+		Long: "For a Management cluster whose providers were installed some other way. Checks that\n" +
+			"their versions are the config's, then records the fingerprint of providers.variables on\n" +
+			"them. Run it only if they run with exactly those variables (feature gates).",
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := load()
 			if err != nil {
 				return classify(err)
 			}
-			phases, done, err := a.phases(cfg)
-			if err != nil {
+			if err := a.adopt(cmd.Context(), cfg); err != nil {
 				return classify(err)
 			}
-			defer done()
-			return classify(phase.Run(cmd.Context(), phases, from, stdout))
+			_, _ = fmt.Fprintln(stdout, "providers adopted")
+			return nil
 		},
-	}
-	bootstrapCmd.Flags().StringVar(&from, "from", "", "start at this phase, skipping the ones before it")
-	root.AddCommand(bootstrapCmd)
+	})
+	root.AddCommand(providersCmd)
 
 	recoveryCmd := &cobra.Command{Use: "recovery", Short: "The Recovery bundle", Args: cobra.NoArgs}
 	recoveryCmd.AddCommand(&cobra.Command{
@@ -234,7 +318,15 @@ func newRoot(a app, stdout io.Writer) *cobra.Command {
 			if err != nil {
 				return classify(err)
 			}
-			phases, done, err := a.phases(cfg)
+			location, why, err := a.locate(cmd.Context(), cfg)
+			if err != nil {
+				return classify(err)
+			}
+			if why != "" {
+				location += " (" + why + ")"
+			}
+			_, _ = fmt.Fprintf(stdout, "location: %s\n", location)
+			phases, done, err := a.phases(cfg, false)
 			if err != nil {
 				return classify(err)
 			}
@@ -245,7 +337,7 @@ func newRoot(a app, stdout io.Writer) *cobra.Command {
 				if l.Status.Reason != "" {
 					reason = ": " + l.Status.Reason
 				}
-				_, _ = fmt.Fprintf(stdout, "%-20s %s%s\n", l.Phase, strings.ToUpper(l.Status.State.String()), reason)
+				_, _ = fmt.Fprintf(stdout, "%-25s %s%s\n", l.Phase, strings.ToUpper(l.Status.State.String()), reason)
 			}
 			return classify(err)
 		},

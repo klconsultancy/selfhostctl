@@ -71,6 +71,8 @@ cluster:
 		Docker:     docker,
 		NodesReady: LiveNodesReady,
 		Providers:  providers.Clusterctl{GitHubToken: os.Getenv("GITHUB_TOKEN"), WaitTimeout: 10 * time.Minute},
+		// It starts from nothing, without a kubeconfig.
+		First: true,
 	}
 
 	states := func() string {

@@ -208,7 +208,7 @@ func TestRecoveryBundlePhase(t *testing.T) {
 
 func TestKubeconfigPhase(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "kube", "mgmt.kubeconfig")
-	cfg, err := config.Parse("t.yaml", []byte(strings.Replace(testYAML, "  namespace: mgmt\n", "  namespace: mgmt\n  kubeconfig: "+path+"\n", 1)))
+	cfg, err := config.Parse("t.yaml", []byte(strings.Replace(testYAML, "/nonexistent/selfhostctl-test/mgmt.kubeconfig", path, 1)))
 	if err != nil {
 		t.Fatal(err)
 	}

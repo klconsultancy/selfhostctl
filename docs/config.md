@@ -56,6 +56,7 @@ Relative paths are relative to the config file.
 | `providers.variables` | no | clusterctl variables for the providers' components, e.g. other feature gates. **They are the only ones used.** Variables in the operator's environment never reach clusterctl, so a run can't turn a gate off by accident. The one exception is `GITHUB_TOKEN`, which only lifts the GitHub rate limit for clusterctl's downloads. |
 | `bootstrapCluster.network` | no | The Docker network the Bootstrap cluster joins. Empty: Docker's default network. An infrastructure provider in Docker (CAPD) puts its machines on `kind`, so the Bootstrap cluster must join it. A missing network is created as a bridge. |
 | `bootstrapCluster.extraMounts[]` | no | Bind mounts from the host into the Bootstrap cluster: `hostPath` and `containerPath` (absolute), `readOnly`. |
+| `bootstrapCluster.deleteAfterStable` | no | How long the Management cluster must manage itself unchanged before the Bootstrap cluster is deleted. A duration; default `10m`. |
 
 | `cluster.manifests` | yes | The Management cluster's own definition: a kustomization directory (built in-process), a directory of YAML files (applied in name order), or one file. It holds the Cluster, its control plane, infrastructure and machine templates. No `${VAR}` substitution: secrets come through `beforeApply`. |
 | `cluster.namespace` | yes | The Cluster object's namespace: the one namespace a move covers. |
@@ -70,6 +71,7 @@ None of the `recovery` variables has to be set to start a bootstrap: the checkpo
 
 | Field | Required | Meaning |
 | --- | --- | --- |
+| `afterPivot[]` | no | Entries like `beforeApply`'s (`manifest` or `helm`), without `clusters`: installed on the Management cluster once it manages itself, before the Bootstrap cluster goes. Empty when GitOps comes from the cluster's own definition. |
 | `beforeApply[]` | no | What must be on a cluster before the Management cluster is applied to it: an API proxy the infrastructure provider talks to, a Secret the machines read at boot. Each entry has exactly one of `manifest` and `helm`, and `clusters`. |
 | `beforeApply[].clusters` | yes | Where the entry is installed: `bootstrap` (the Bootstrap cluster), `management` (the Management cluster itself, after the pivot), or both. The key is not `on`, because YAML 1.1 reads `on` as the boolean `true`. |
 | `beforeApply[].manifest.path` | yes | A YAML file of Kubernetes objects, applied server-side (field manager `selfhostctl`). Every namespaced object names its namespace. |

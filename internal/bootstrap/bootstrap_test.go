@@ -107,6 +107,7 @@ providers:
 cluster:
   manifests: cluster.yaml
   namespace: mgmt
+  kubeconfig: /nonexistent/selfhostctl-test/mgmt.kubeconfig
 bootstrapCluster:
   network: kind
 `
@@ -149,6 +150,8 @@ func deps(d *fakeDocker, kubeconfigs *[]string) Deps {
 		},
 		ReadyTimeout: time.Second,
 		Providers:    &fakeInstaller{},
+		// These tests start from nothing; locate's guard has its own tests.
+		First: true,
 	}
 }
 
