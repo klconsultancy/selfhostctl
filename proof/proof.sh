@@ -63,8 +63,30 @@ need() {
   mkdir -p "$WORK"
 }
 
+# The Bootstrap cluster: kind (BOOTSTRAP=kind, the default) or one k0s container
+# (BOOTSTRAP=k0s), both on the kind network with the host's Docker socket for CAPD.
+BOOTSTRAP=${BOOTSTRAP:-kind}
+K0S_BOOT=selfhostctl-proof-bootstrap
+K0S_BOOT_PORT=17443
+
 kind_up() {
-  log "Bootstrap cluster (kind)"
+  log "Bootstrap cluster ($BOOTSTRAP)"
+  if [[ $BOOTSTRAP == k0s ]]; then
+    docker network inspect kind >/dev/null 2>&1 || docker network create kind >/dev/null
+    if ! docker container inspect "$K0S_BOOT" >/dev/null 2>&1; then
+      docker run -d --name "$K0S_BOOT" --hostname "$K0S_BOOT" --privileged --network kind \
+        -v /var/lib/k0s -v /var/run/docker.sock:/var/run/docker.sock --tmpfs /run \
+        -p 127.0.0.1:$K0S_BOOT_PORT:6443 \
+        "docker.io/k0sproject/k0s:${K0S_VERSION/+/-}" k0s controller --enable-worker --no-taints >/dev/null
+    fi
+    until_ok 300 "bootstrap admin.conf" docker exec "$K0S_BOOT" test -s /var/lib/k0s/pki/admin.conf
+    docker exec "$K0S_BOOT" cat /var/lib/k0s/pki/admin.conf \
+      | sed "s#https://localhost:6443#https://127.0.0.1:$K0S_BOOT_PORT#" >"$KIND_KUBECONFIG"
+    until_ok 300 "bootstrap node registered" bash -c "kubectl --kubeconfig '$KIND_KUBECONFIG' get nodes -o name | grep -q ."
+    kk wait node --all --for=condition=Ready --timeout=5m
+    kk -n kube-system wait pod --all --for=condition=Ready --timeout=5m
+    return
+  fi
   if ! kind get clusters | grep -qx "$KIND_NAME"; then
     kind create cluster --name "$KIND_NAME" --config "$DIR/kind.yaml" --kubeconfig "$KIND_KUBECONFIG" --wait 2m
   fi
@@ -73,6 +95,10 @@ kind_up() {
 
 kind_down() {
   log "Bootstrap cluster deleted"
+  if [[ $BOOTSTRAP == k0s ]]; then
+    docker rm -f -v "$K0S_BOOT"
+    return
+  fi
   kind delete cluster --name "$KIND_NAME"
 }
 
@@ -308,7 +334,7 @@ dump() {
   done
   echo "##### docker"
   docker ps -a
-  for c in $(docker ps -a --filter "label=io.x-k8s.kind.cluster=$CLUSTER" --format '{{.Names}}') "$BG"; do
+  for c in $(docker ps -a --filter "label=io.x-k8s.kind.cluster=$CLUSTER" --format '{{.Names}}') "$BG" "$K0S_BOOT"; do
     echo "--- $c"
     docker logs --tail 100 "$c" 2>&1
     docker exec "$c" sh -c 'journalctl -u k0scontroller --no-pager -n 150; cat /var/log/cloud-init-output.log 2>/dev/null | tail -50' 2>&1
@@ -318,7 +344,7 @@ dump() {
 clean() {
   set +e
   kind delete cluster --name "$KIND_NAME"
-  docker rm -f -v "$BG" "$DB" $(docker ps -aq --filter "label=io.x-k8s.kind.cluster=$CLUSTER") 2>/dev/null
+  docker rm -f -v "$BG" "$DB" "$K0S_BOOT" $(docker ps -aq --filter "label=io.x-k8s.kind.cluster=$CLUSTER") 2>/dev/null
   rm -rf "$WORK"
 }
 
