@@ -40,7 +40,7 @@ func configFile(t *testing.T, content string) string {
 	return f
 }
 
-const validConfig = "apiVersion: selfhostctl/v1alpha1\nkind: ManagementCluster\nmetadata:\n  name: management\n"
+const validConfig = "apiVersion: selfhostctl/v1alpha1\nkind: ManagementCluster\nmetadata:\n  name: management\nproviders:\n  bootstrap: [{name: k0sproject-k0smotron, version: v2.3.0}]\n  controlPlane: [{name: k0sproject-k0smotron, version: v2.3.0}]\n  infrastructure: [{name: docker, version: v1.14.4}]\n"
 
 func TestRun(t *testing.T) {
 	cfg := configFile(t, validConfig)

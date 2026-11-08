@@ -12,6 +12,10 @@ apiVersion: selfhostctl/v1alpha1
 kind: ManagementCluster
 metadata:
   name: management
+providers:
+  bootstrap: [{name: k0sproject-k0smotron, version: v2.3.0}]
+  controlPlane: [{name: k0sproject-k0smotron, version: v2.3.0}]
+  infrastructure: [{name: docker, version: v1.14.4}]
 bootstrapCluster:
   network: kind
   extraMounts:
@@ -54,6 +58,22 @@ func TestParseRejects(t *testing.T) {
 			name: "bad name",
 			yaml: strings.Replace(valid, "name: management", "name: Management_1", 1),
 			want: []string{`metadata.name: "Management_1"`},
+		},
+		{
+			name: "missing provider types",
+			yaml: strings.Replace(valid, "  controlPlane: [{name: k0sproject-k0smotron, version: v2.3.0}]\n", "", 1),
+			want: []string{"providers.controlPlane: at least one provider is required"},
+		},
+		{
+			name: "bad provider entries",
+			yaml: strings.Replace(valid, "  infrastructure: [{name: docker, version: v1.14.4}]",
+				"  infrastructure: [{name: docker, version: '1.14'}, {name: docker, version: v1.14.4, url: http://x}]", 1),
+			want: []string{`infrastructure[0].version: "1.14"`, `infrastructure[1].name: "docker" is declared twice`, "infrastructure[1].url: must be an https URL"},
+		},
+		{
+			name: "CLUSTER_TOPOLOGY as a variable",
+			yaml: strings.Replace(valid, "providers:\n", "providers:\n  variables: {CLUSTER_TOPOLOGY: \"true\"}\n", 1),
+			want: []string{"set CLUSTER_TOPOLOGY through providers.clusterTopology"},
 		},
 		{
 			name: "relative mount paths",
