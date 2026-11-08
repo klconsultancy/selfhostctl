@@ -9,12 +9,15 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"slices"
 	"strings"
 
 	"sigs.k8s.io/yaml"
+
+	"github.com/klconsultancy/selfhostctl/internal/envsubst"
 )
 
 const (
@@ -29,6 +32,71 @@ type ManagementCluster struct {
 	Metadata         Metadata         `json:"metadata"`
 	Providers        Providers        `json:"providers"`
 	BootstrapCluster BootstrapCluster `json:"bootstrapCluster"`
+	// BeforeApply is installed before the cluster is applied, e.g. an API proxy the
+	// infrastructure provider talks to, or a Secret the machines read at boot.
+	BeforeApply []Prerequisite `json:"beforeApply,omitempty"`
+
+	// dir is the config file's directory; relative paths in the config are relative to
+	// it.
+	dir string
+}
+
+// The clusters a Prerequisite can be installed on.
+const (
+	OnBootstrap  = "bootstrap"
+	OnManagement = "management"
+)
+
+// Prerequisite is one manifest file or one Helm chart.
+type Prerequisite struct {
+	Manifest *Manifest `json:"manifest,omitempty"`
+	Helm     *Helm     `json:"helm,omitempty"`
+	// Clusters lists where it is installed: the Bootstrap cluster, the Management
+	// cluster itself, or both. Not `on`: YAML 1.1 reads that key as the boolean true.
+	Clusters []string `json:"clusters"`
+}
+
+// Manifest is a YAML file of Kubernetes objects, with ${VAR} substituted from the
+// environment, applied server-side.
+type Manifest struct {
+	Path string `json:"path"`
+}
+
+// Helm is a chart installed or upgraded through the Helm SDK.
+type Helm struct {
+	// Chart is an oci:// reference, a chart name in Repo, or a local directory.
+	Chart string `json:"chart"`
+	// Repo is a classic chart repository's URL, for a chart name.
+	Repo    string `json:"repo,omitempty"`
+	Version string `json:"version,omitempty"`
+	Release string `json:"release"`
+	// Namespace of the release, created when missing.
+	Namespace string `json:"namespace"`
+	// Values is a YAML file, with ${VAR} substituted from the environment.
+	Values string `json:"values,omitempty"`
+}
+
+// Path resolves a path from the config relative to the config file.
+func (c *ManagementCluster) Path(p string) string {
+	if p == "" || path.IsAbs(p) || c.dir == "" {
+		return p
+	}
+	return path.Join(c.dir, p)
+}
+
+// IsOn reports whether p is installed on the given cluster (OnBootstrap or
+// OnManagement).
+func (p Prerequisite) IsOn(cluster string) bool { return slices.Contains(p.Clusters, cluster) }
+
+// Name describes p in output.
+func (p Prerequisite) Name() string {
+	if p.Manifest != nil {
+		return "manifest " + p.Manifest.Path
+	}
+	if p.Helm != nil {
+		return "chart " + p.Helm.Release
+	}
+	return "nothing"
 }
 
 // Providers are the Cluster API providers besides the core, whose version follows from
@@ -95,7 +163,59 @@ func Load(file string) (*ManagementCluster, error) {
 	if err != nil {
 		return nil, &Error{File: file, Problems: []string{err.Error()}}
 	}
-	return Parse(file, data)
+	c, err := Parse(file, data)
+	if err != nil {
+		return nil, err
+	}
+	c.dir = filepath.Dir(file)
+	if problems := c.checkFiles(); len(problems) > 0 {
+		return nil, &Error{File: file, Problems: problems}
+	}
+	return c, nil
+}
+
+// checkFiles: every file the config names exists.
+func (c *ManagementCluster) checkFiles() []string {
+	var problems []string
+	for i, p := range c.BeforeApply {
+		at := fmt.Sprintf("beforeApply[%d]", i)
+		var files []string
+		if p.Manifest != nil {
+			files = append(files, p.Manifest.Path)
+		}
+		if p.Helm != nil && p.Helm.Values != "" {
+			files = append(files, p.Helm.Values)
+		}
+		for _, f := range files {
+			if _, err := os.Stat(c.Path(f)); err != nil {
+				problems = append(problems, fmt.Sprintf("%s: %v", at, err))
+			}
+		}
+	}
+	return problems
+}
+
+// FileEnvRefs lists the environment variables the files the config names refer to
+// as ${VAR}: manifests and Helm values.
+func (c *ManagementCluster) FileEnvRefs() ([]string, error) {
+	var names []string
+	for _, p := range c.BeforeApply {
+		var file string
+		switch {
+		case p.Manifest != nil:
+			file = p.Manifest.Path
+		case p.Helm != nil && p.Helm.Values != "":
+			file = p.Helm.Values
+		default:
+			continue
+		}
+		data, err := os.ReadFile(c.Path(file))
+		if err != nil {
+			return nil, &Error{File: file, Problems: []string{err.Error()}}
+		}
+		names = append(names, envsubst.Refs(string(data))...)
+	}
+	return names, nil
 }
 
 // Parse decodes and validates a config. file only names it in errors.
@@ -184,6 +304,9 @@ func (c *ManagementCluster) validate() []string {
 		problems = append(problems, fmt.Sprintf("metadata.name: %q must be a lowercase DNS label of at most 40 characters", c.Metadata.Name))
 	}
 	problems = append(problems, c.Providers.validate()...)
+	for i, p := range c.BeforeApply {
+		problems = append(problems, p.validate(fmt.Sprintf("beforeApply[%d]", i))...)
+	}
 	for i, m := range c.BootstrapCluster.ExtraMounts {
 		at := fmt.Sprintf("bootstrapCluster.extraMounts[%d]", i)
 		if !path.IsAbs(m.HostPath) {
@@ -191,6 +314,40 @@ func (c *ManagementCluster) validate() []string {
 		}
 		if !path.IsAbs(m.ContainerPath) {
 			problems = append(problems, at+".containerPath: must be an absolute path")
+		}
+	}
+	return problems
+}
+
+func (p Prerequisite) validate(at string) []string {
+	var problems []string
+	if (p.Manifest == nil) == (p.Helm == nil) {
+		problems = append(problems, at+": exactly one of manifest and helm is required")
+	}
+	if len(p.Clusters) == 0 {
+		problems = append(problems, at+".clusters: at least one of bootstrap, management is required")
+	}
+	for _, o := range p.Clusters {
+		if o != OnBootstrap && o != OnManagement {
+			problems = append(problems, fmt.Sprintf("%s.clusters: %q is neither bootstrap nor management", at, o))
+		}
+	}
+	if m := p.Manifest; m != nil && m.Path == "" {
+		problems = append(problems, at+".manifest.path: required")
+	}
+	if h := p.Helm; h != nil {
+		if h.Chart == "" {
+			problems = append(problems, at+".helm.chart: required")
+		}
+		if !dnsLabel.MatchString(h.Release) {
+			problems = append(problems, fmt.Sprintf("%s.helm.release: %q must be a lowercase DNS label", at, h.Release))
+		}
+		if !dnsLabel.MatchString(h.Namespace) {
+			problems = append(problems, fmt.Sprintf("%s.helm.namespace: %q must be a lowercase DNS label", at, h.Namespace))
+		}
+		remote := strings.HasPrefix(h.Chart, "oci://") || h.Repo != ""
+		if remote && h.Version == "" {
+			problems = append(problems, at+".helm.version: required for a remote chart, so the install is reproducible")
 		}
 	}
 	return problems
@@ -254,10 +411,15 @@ func (e *MissingEnvError) Error() string {
 }
 
 // CheckEnv returns a *MissingEnvError when any variable the config needs is unset or
-// empty, before anything runs. lookup is os.LookupEnv outside tests.
+// empty, before anything runs: the config's env references and the ${VAR}s in the files
+// it names. lookup is os.LookupEnv outside tests.
 func (c *ManagementCluster) CheckEnv(lookup func(string) (string, bool)) error {
+	fileRefs, err := c.FileEnvRefs()
+	if err != nil {
+		return err
+	}
 	var missing []string
-	for _, name := range envRefs(reflect.ValueOf(c)) {
+	for _, name := range append(envRefs(reflect.ValueOf(c)), fileRefs...) {
 		if v, ok := lookup(name); !ok || v == "" {
 			missing = append(missing, name)
 		}

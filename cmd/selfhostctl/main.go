@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/klconsultancy/selfhostctl/internal/beforeapply"
 	"github.com/klconsultancy/selfhostctl/internal/bootstrap"
 	"github.com/klconsultancy/selfhostctl/internal/config"
 	"github.com/klconsultancy/selfhostctl/internal/dockerhost"
@@ -64,7 +65,8 @@ func liveApp() app {
 				NodesReady: bootstrap.LiveNodesReady,
 				// The token only lifts clusterctl's GitHub rate limit; nothing else from
 				// the environment reaches clusterctl.
-				Providers: providers.Clusterctl{GitHubToken: os.Getenv("GITHUB_TOKEN"), WaitTimeout: 10 * time.Minute},
+				Providers:     providers.Clusterctl{GitHubToken: os.Getenv("GITHUB_TOKEN"), WaitTimeout: 10 * time.Minute},
+				Prerequisites: beforeapply.Applier{Config: cfg, Lookup: os.LookupEnv},
 			}
 			return bootstrap.Phases(cfg, deps), func() { _ = docker.Close() }, nil
 		},

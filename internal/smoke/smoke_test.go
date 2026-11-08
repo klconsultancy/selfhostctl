@@ -38,6 +38,7 @@ import (
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/klconsultancy/selfhostctl/internal/bootstrap"
+	"github.com/klconsultancy/selfhostctl/internal/dockerhost"
 )
 
 const (
@@ -50,7 +51,7 @@ const (
 func TestLibrariesTogether(t *testing.T) {
 	ctx := t.Context()
 
-	docker, err := client.New(client.FromEnv)
+	docker, err := dockerhost.New(dockerhost.OS)
 	if err != nil {
 		t.Fatalf("docker client: %v", err)
 	}

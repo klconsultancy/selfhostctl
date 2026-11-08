@@ -6,6 +6,7 @@ import (
 	"context"
 	"io"
 	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/client"
 
+	"github.com/klconsultancy/selfhostctl/internal/beforeapply"
 	"github.com/klconsultancy/selfhostctl/internal/config"
 	"github.com/klconsultancy/selfhostctl/internal/phase"
 	"github.com/klconsultancy/selfhostctl/internal/providers"
@@ -246,5 +248,52 @@ func TestBootstrapClusterPhaseBlocksOnAnotherImage(t *testing.T) {
 	st, err := Phases(testConfig(t, ""), deps(d, &kubeconfigs))[0].Status(t.Context())
 	if err != nil || st.State != phase.Blocked {
 		t.Fatalf("Status: %v, %v; want blocked", st, err)
+	}
+}
+
+// fakePrereqs keeps the state of each prerequisite by name.
+type fakePrereqs struct {
+	state   map[string]beforeapply.State
+	applied []string
+}
+
+func (f *fakePrereqs) State(_ context.Context, _ []byte, p config.Prerequisite) (beforeapply.State, error) {
+	return f.state[p.Name()], nil
+}
+
+func (f *fakePrereqs) Apply(_ context.Context, _ []byte, p config.Prerequisite) error {
+	f.applied = append(f.applied, p.Name())
+	f.state[p.Name()] = beforeapply.State{Done: true}
+	return nil
+}
+
+func TestBeforeApplyPhase(t *testing.T) {
+	d := newFakeDocker()
+	var kubeconfigs []string
+	dp := deps(d, &kubeconfigs)
+	pre := &fakePrereqs{state: map[string]beforeapply.State{"manifest b.yaml": {Done: true}}}
+	dp.Prerequisites = pre
+	cfg := testConfig(t, `beforeApply:
+  - manifest: {path: a.yaml}
+    clusters: [bootstrap]
+  - manifest: {path: b.yaml}
+    clusters: [bootstrap, management]
+  - manifest: {path: only-target.yaml}
+    clusters: [management]
+`)
+	if err := phase.Run(t.Context(), Phases(cfg, dp), "", io.Discard); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// b was done already; only-target is not for the Bootstrap cluster.
+	if want := []string{"manifest a.yaml"}; !slices.Equal(pre.applied, want) {
+		t.Errorf("applied %v, want %v", pre.applied, want)
+	}
+	if st, _ := Phases(cfg, dp)[2].Status(t.Context()); st.State != phase.Done {
+		t.Errorf("after: %v, want done", st)
+	}
+
+	pre.state["manifest a.yaml"] = beforeapply.State{Blocked: "a pending Helm release"}
+	if st, _ := Phases(cfg, dp)[2].Status(t.Context()); st.State != phase.Blocked || !strings.Contains(st.Reason, "manifest a.yaml: a pending Helm release") {
+		t.Errorf("blocked entry: %v", st)
 	}
 }

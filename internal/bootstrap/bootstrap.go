@@ -41,6 +41,8 @@ type Deps struct {
 	// Providers reads and installs the Cluster API providers;
 	// providers.Clusterctl outside tests.
 	Providers providers.Installer
+	// Prerequisites judges and installs the beforeApply entries.
+	Prerequisites Prerequisites
 }
 
 // LiveNodesReady is Deps.NodesReady against a real cluster.
@@ -57,6 +59,7 @@ func Phases(cfg *config.ManagementCluster, deps Deps) []phase.Phase {
 	return []phase.Phase{
 		newBootstrapClusterPhase(cfg, deps),
 		newProvidersPhase(cfg, deps),
+		newBeforeApplyPhase(cfg, deps),
 	}
 }
 
