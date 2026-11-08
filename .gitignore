@@ -1,0 +1,4 @@
+/selfhostctl
+/dist/
+*.test
+*.out

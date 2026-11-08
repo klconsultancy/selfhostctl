@@ -1,0 +1,21 @@
+{
+  "name": "selfhostctl",
+  "build": { "dockerfile": "Dockerfile" },
+  // The module, build and lint caches share one volume, so they survive a rebuild.
+  "mounts": [
+    "source=selfhostctl-go,target=/go/pkg,type=volume"
+  ],
+  "containerEnv": {
+    "GOCACHE": "/go/pkg/cache/go-build",
+    "GOLANGCI_LINT_CACHE": "/go/pkg/cache/golangci-lint"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": ["golang.go"],
+      "settings": {
+        "go.lintTool": "golangci-lint",
+        "go.lintFlags": ["--fast-only"]
+      }
+    }
+  }
+}
