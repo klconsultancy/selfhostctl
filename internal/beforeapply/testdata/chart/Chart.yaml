@@ -1,0 +1,4 @@
+apiVersion: v2
+name: prereq
+description: A one-ConfigMap chart for the beforeApply integration test.
+version: 0.1.0
