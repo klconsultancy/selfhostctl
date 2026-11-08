@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/klconsultancy/selfhostctl/internal/apply"
 	"github.com/klconsultancy/selfhostctl/internal/config"
 	"github.com/klconsultancy/selfhostctl/internal/k0scontainer"
+	"github.com/klconsultancy/selfhostctl/internal/recovery"
 )
 
 // Location is where the Management cluster's objects live (docs/design.md#lifecycle-state).
@@ -64,6 +66,7 @@ type locator struct {
 	clients Clients
 	// probe reports whether something accepts connections at host:port.
 	probe func(ctx context.Context, hostport string) bool
+	now   func() time.Time
 
 	mu  sync.Mutex
 	sit *Situation
@@ -139,14 +142,25 @@ func (l *locator) locate(ctx context.Context) (Situation, error) {
 		return s, err
 	}
 	var inManagement, reachable bool
+	var refused string
 	kc, err := os.ReadFile(path)
 	haveFile := err == nil
 	if haveFile {
-		var herr error
-		inManagement, s.TargetPaused, herr = l.hold(ctx, kc)
-		reachable = herr == nil
-		if reachable {
-			s.ManagementKC = kc
+		now := time.Now
+		if l.now != nil {
+			now = l.now
+		}
+		if exp, ok := recovery.ClientCertExpiry(kc); ok && now().After(exp) {
+			refused = "its certificate expired on " + exp.Format(time.DateOnly)
+		} else {
+			var herr error
+			inManagement, s.TargetPaused, herr = l.hold(ctx, kc)
+			reachable = herr == nil
+			if reachable {
+				s.ManagementKC = kc
+			} else if credentialsRefused(herr) {
+				refused = "the cluster refuses its credentials"
+			}
 		}
 	}
 
@@ -155,8 +169,12 @@ func (l *locator) locate(ctx context.Context) (Situation, error) {
 		s.Location = LocationSplit
 	case inManagement:
 		s.Location = LocationManagement
-	case inBootstrap:
+	case inBootstrap && refused == "":
 		s.Location = LocationBootstrap
+	case refused != "":
+		s.Location = LocationUnknown
+		s.Unanswered = true
+		s.Reason = fmt.Sprintf("the kubeconfig at %s can't be used: %s. Renew it from the Recovery bundle with `op run -- selfhostctl kubeconfig renew -f <config>` (the bundle in the variable recovery.bundleFromEnv names), then run again", path, refused)
 	case haveFile && !reachable:
 		// Before an empty Bootstrap cluster counts as none: after the pivot, a
 		// Management cluster that doesn't answer for a moment must not make the
@@ -175,6 +193,15 @@ func (l *locator) locate(ctx context.Context) (Situation, error) {
 		s.Reason = fmt.Sprintf("no kubeconfig at %s, so nothing proves there is no Management cluster yet: copy it there, or run with --first if this is the cluster's first bootstrap", path)
 	}
 	return s, nil
+}
+
+// credentialsRefused: the API answered, but not to these credentials.
+func credentialsRefused(err error) bool {
+	if apierrors.IsUnauthorized(err) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "certificate has expired") || strings.Contains(msg, "Unauthorized")
 }
 
 // knownEndpoint is the control-plane endpoint as far as the tool knows it without a

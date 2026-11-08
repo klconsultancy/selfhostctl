@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -141,6 +142,39 @@ func liveApp() app {
 			return deps.Providers.(providers.Clusterctl).Adopt(ctx, kc, providers.FromConfig(&cfg.Providers))
 		},
 	}
+}
+
+// renewValidity is how long a renewed kubeconfig lasts: a bridge until bootstrap
+// refreshes it from the Management cluster's own Secret.
+const renewValidity = 30 * 24 * time.Hour
+
+func renewKubeconfig(cfg *config.ManagementCluster, lookup func(string) (string, bool), now time.Time) (string, error) {
+	if cfg.Recovery == nil {
+		return "", &exitError{exitUsage, errors.New("kubeconfig renew needs recovery in the config, for the Recovery bundle")}
+	}
+	value, _ := lookup(cfg.Recovery.BundleFromEnv)
+	if value == "" {
+		return "", &exitError{exitUsage, fmt.Errorf("no Recovery bundle in %s: load it for this command, e.g. op run -- selfhostctl kubeconfig renew", cfg.Recovery.BundleFromEnv)}
+	}
+	b, err := recovery.Parse(value)
+	if err != nil {
+		return "", &exitError{exitUsage, fmt.Errorf("%s: %w", cfg.Recovery.BundleFromEnv, err)}
+	}
+	kc, err := b.AdminKubeconfig(cfg.ClusterName(), renewValidity, now)
+	if err != nil {
+		return "", err
+	}
+	path, err := cfg.KubeconfigPath()
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(path+".tmp", kc, 0o600); err != nil {
+		return "", err
+	}
+	return path, os.Rename(path+".tmp", path)
 }
 
 // exitError carries a command's exit code; any other error from cobra is a usage
@@ -285,6 +319,30 @@ func newRoot(a app, stdout io.Writer) *cobra.Command {
 		},
 	})
 	root.AddCommand(providersCmd)
+
+	kubeconfigCmd := &cobra.Command{Use: "kubeconfig", Short: "The Management cluster's admin kubeconfig", Args: cobra.NoArgs}
+	kubeconfigCmd.AddCommand(&cobra.Command{
+		Use:   "renew",
+		Short: "Write a new admin kubeconfig signed with the Recovery bundle's CA",
+		Long: "For when cluster.kubeconfig has expired or is lost. Reads the Recovery bundle from the\n" +
+			"variable recovery.bundleFromEnv names: load it for this one command only, e.g.\n" +
+			"op run -- selfhostctl kubeconfig renew -f <config>. The certificate is valid for 30\n" +
+			"days; the next bootstrap run refreshes the file from the Management cluster.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg, err := load()
+			if err != nil {
+				return classify(err)
+			}
+			path, err := renewKubeconfig(cfg, a.lookupEnv, time.Now())
+			if err != nil {
+				return classify(err)
+			}
+			_, _ = fmt.Fprintln(stdout, "wrote", path)
+			return nil
+		},
+	})
+	root.AddCommand(kubeconfigCmd)
 
 	recoveryCmd := &cobra.Command{Use: "recovery", Short: "The Recovery bundle", Args: cobra.NoArgs}
 	recoveryCmd.AddCommand(&cobra.Command{

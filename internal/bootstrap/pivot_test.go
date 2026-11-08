@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -21,6 +23,7 @@ import (
 	"github.com/klconsultancy/selfhostctl/internal/config"
 	"github.com/klconsultancy/selfhostctl/internal/phase"
 	"github.com/klconsultancy/selfhostctl/internal/providers"
+	"github.com/klconsultancy/selfhostctl/internal/recovery"
 )
 
 // The Bootstrap cluster's kubeconfig as the fake Docker returns it, and the
@@ -49,6 +52,7 @@ type world struct {
 	installed   map[string][]providers.Installed
 	moves       []string
 	probeAnswer bool
+	refuse      bool // the Management cluster answers Unauthorized
 }
 
 func (w *world) clients(kc []byte) (ctrlclient.Client, error) {
@@ -59,6 +63,9 @@ func (w *world) clients(kc []byte) (ctrlclient.Client, error) {
 		}
 		return w.bootstrap, nil
 	case managementKC_:
+		if w.refuse {
+			return nil, apierrors.NewUnauthorized("Unauthorized")
+		}
 		if w.management == nil {
 			return nil, errors.New("connection refused")
 		}
@@ -236,15 +243,20 @@ func TestFailClosed(t *testing.T) {
 }
 
 // After the pivot, nothing before it runs again and no Bootstrap cluster appears.
+// kubeconfigSecret is Cluster API's <cluster>-kubeconfig Secret holding value.
+func kubeconfigSecret(value string) *corev1.Secret {
+	return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "mgmt", Name: "mgmt-kubeconfig"}, Data: map[string][]byte{"value": []byte(value)}}
+}
+
 func TestPivotedRunsNothing(t *testing.T) {
-	w := &world{docker: newFakeDocker(), kubeconfig: kubeconfigFile(t), management: newFake(theCluster(false))}
+	w := &world{docker: newFakeDocker(), kubeconfig: kubeconfigFile(t), management: newFake(theCluster(false), kubeconfigSecret(managementKC_))}
 	got := states(t, w.phases(t, false))
-	for _, name := range []string{"bootstrap-cluster", "providers", "before-apply", "apply", "ready", "recovery-bundle", "kubeconfig"} {
+	for _, name := range []string{"bootstrap-cluster", "providers", "before-apply", "apply", "ready", "recovery-bundle"} {
 		if got[name].State != phase.Done || got[name].Reason != "pivoted" {
 			t.Errorf("%s: %+v, want done (pivoted)", name, got[name])
 		}
 	}
-	for _, name := range []string{"management-providers", "move", "delete-bootstrap-cluster"} {
+	for _, name := range []string{"kubeconfig", "management-providers", "move", "delete-bootstrap-cluster"} {
 		if got[name].State != phase.Done {
 			t.Errorf("%s: %+v, want done", name, got[name])
 		}
@@ -338,3 +350,47 @@ func TestDeleteBootstrapClusterWaitsForTheStableWindow(t *testing.T) {
 type ioDiscard struct{}
 
 func (ioDiscard) Write(p []byte) (int, error) { return len(p), nil }
+
+// After the pivot, a certificate Cluster API renewed in the Management cluster's Secret
+// reaches the kubeconfig file.
+func TestKubeconfigFollowsTheManagementCluster(t *testing.T) {
+	w := &world{docker: newFakeDocker(), kubeconfig: kubeconfigFile(t), management: newFake(theCluster(false), kubeconfigSecret("renewed\n"))}
+	if st := statusOf(t, w.phases(t, false), "kubeconfig"); st.State != phase.Next {
+		t.Fatalf("a renewed Secret: %+v, want next", st)
+	}
+	if err := phase.Run(t.Context(), w.phases(t, false), "kubeconfig", ioDiscard{}); err == nil {
+		// The run continues past kubeconfig, which doesn't matter here.
+		t.Log("ran")
+	}
+	if got, _ := os.ReadFile(w.kubeconfig); string(got) != "renewed\n" {
+		t.Errorf("kubeconfig file %q, want the renewed one", got)
+	}
+}
+
+// An expired or refused kubeconfig says how to renew it, not to remove it, and blocks
+// even --first.
+func TestKubeconfigThatCantBeUsed(t *testing.T) {
+	crt, key := keyPair(t)
+	b := &recovery.Bundle{CA: recovery.KeyPair{Cert: crt, Key: key}, Endpoint: recovery.Endpoint{Host: "10.0.0.1", Port: 6443}}
+	expired, err := b.AdminKubeconfig("mgmt", time.Hour, time.Now().Add(-48*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "mgmt.kubeconfig")
+	if err := os.WriteFile(path, expired, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w := &world{docker: newFakeDocker(), kubeconfig: path}
+	for _, first := range []bool{false, true} {
+		st := statusOf(t, w.phases(t, first), "bootstrap-cluster")
+		if st.State != phase.Blocked || !strings.Contains(st.Reason, "certificate expired") || !strings.Contains(st.Reason, "kubeconfig renew") || strings.Contains(st.Reason, "remove") {
+			t.Errorf("an expired kubeconfig (--first %v): %+v", first, st)
+		}
+	}
+
+	// A kubeconfig whose cluster refuses it.
+	w = &world{docker: newFakeDocker(), kubeconfig: kubeconfigFile(t), refuse: true}
+	if st := statusOf(t, w.phases(t, false), "bootstrap-cluster"); st.State != phase.Blocked || !strings.Contains(st.Reason, "refuses its credentials") {
+		t.Errorf("a refused kubeconfig: %+v", st)
+	}
+}

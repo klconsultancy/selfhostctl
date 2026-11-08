@@ -5,6 +5,7 @@ selfhostctl bootstrap       -f management.yaml [--from <phase>] [--first]
 selfhostctl pivot           -f management.yaml
 selfhostctl status          -f management.yaml
 selfhostctl providers adopt -f management.yaml
+selfhostctl kubeconfig renew -f management.yaml   # with the Recovery bundle, e.g. via op run
 selfhostctl recovery export -f management.yaml > into-your-secret-store
 selfhostctl version
 ```
@@ -38,6 +39,8 @@ The config is described in [config.md](config.md). Terms such as Phase, Manual c
 - a kubeconfig exists but its cluster doesn't answer: a network blip (run again), a lost cluster (`recover`) or a stale file (remove it);
 - the endpoint known from the manifests (e.g. a ProxmoxCluster's) accepts connections.
 
+`kubeconfig renew` writes a new admin kubeconfig signed with the Recovery bundle's CA, valid 30 days, for when the file has expired or is lost. Load the bundle for that one command only: `op run -- selfhostctl kubeconfig renew -f management.yaml`.
+
 `pivot` runs bootstrap's phases from `management-providers`. `providers adopt` stamps a Management cluster's providers, installed some other way, with the config's variables fingerprint, after checking their versions. Run it only if they run with exactly `providers.variables`.
 
 `bootstrap` has these Phases:
@@ -50,7 +53,7 @@ The config is described in [config.md](config.md). Terms such as Phase, Manual c
 | `apply` | `cluster.manifests` is applied to the Bootstrap cluster: a server-side dry-run would change nothing. |
 | `ready` | The Cluster is `ControlPlaneAvailable`, its control plane has as many ready replicas as it wants, and every Machine is `NodeHealthy`. Running waits up to 30 minutes. `status` says what it still waits for. |
 | `recovery-bundle` | **A Manual checkpoint.** The Recovery bundle in `recovery.bundleFromEnv` matches the cluster: the same CA, service-account key, front-proxy CA and endpoint, each private key belonging to its certificate. The variables `recovery.encryptionKeyFromEnv` and `recovery.kine.datasourceFromEnv` name are set too. Until then, the command stops with exit 4 and tells you to run `recovery export`. It warns when no `beforeApply` file uses the encryption-key variable. It is done right away when the config has no `recovery`. |
-| `kubeconfig` | The Management cluster's admin kubeconfig (Cluster API's `<cluster>-kubeconfig` Secret) is at `cluster.kubeconfig`, mode 0600. |
+| `kubeconfig` | `cluster.kubeconfig` (mode 0600) equals Cluster API's `<cluster>-kubeconfig` Secret: from the Bootstrap cluster before the pivot, from the Management cluster after it. So it follows a renewed certificate. The note shows its expiry, with a warning within 30 days. |
 | `management-providers` | The Management cluster runs exactly the declared providers, with the declared variables. Providers without a selfhostctl fingerprint: **manual**, `providers adopt`. Other versions: blocked. |
 | `management-before-apply` | The `beforeApply` entries for `management` are in place on the Management cluster. |
 | `move` | The Cluster's namespace is on the Management cluster, unpaused. **Gates:** the providers match on both sides (versions and fingerprints; an unstamped side is **manual**, `providers adopt`), and the namespace holds no other Cluster. Running does a dry run, then the move. A move that stopped halfway (`split`) resumes, and a move that ended before unpausing is unpaused. |

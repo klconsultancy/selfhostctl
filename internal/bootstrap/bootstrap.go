@@ -82,7 +82,7 @@ func (d *Deps) defaults() {
 // Locate finds where the Management cluster's objects live now.
 func Locate(ctx context.Context, cfg *config.ManagementCluster, deps Deps) (Situation, error) {
 	deps.defaults()
-	l := &locator{cfg: cfg, cluster: BootstrapCluster(cfg, deps.Docker), clients: deps.Clients, probe: deps.Probe}
+	l := &locator{cfg: cfg, cluster: BootstrapCluster(cfg, deps.Docker), clients: deps.Clients, probe: deps.Probe, now: deps.Now}
 	return l.get(ctx)
 }
 
@@ -102,7 +102,7 @@ func LiveNodesReady(ctx context.Context, kubeconfig []byte) (bool, error) {
 func Phases(cfg *config.ManagementCluster, deps Deps) []phase.Phase {
 	deps.defaults()
 	cluster := BootstrapCluster(cfg, deps.Docker)
-	loc := &locator{cfg: cfg, cluster: cluster, clients: deps.Clients, probe: deps.Probe}
+	loc := &locator{cfg: cfg, cluster: cluster, clients: deps.Clients, probe: deps.Probe, now: deps.Now}
 
 	onManagement := func(name string) func(ctx context.Context) ([]byte, *phase.Status, error) {
 		return func(ctx context.Context) ([]byte, *phase.Status, error) {
@@ -130,7 +130,18 @@ func Phases(cfg *config.ManagementCluster, deps Deps) []phase.Phase {
 		prePivot{&applyPhase{cfg: cfg, cluster: cluster, clients: deps.Clients}, loc},
 		prePivot{&readyPhase{cfg: cfg, cluster: cluster, clients: deps.Clients, timeout: deps.ClusterReadyTimeout}, loc},
 		prePivot{&recoveryBundlePhase{cfg: cfg, cluster: cluster, clients: deps.Clients, lookup: deps.Lookup}, loc},
-		prePivot{&kubeconfigPhase{cfg: cfg, cluster: cluster, clients: deps.Clients}, loc},
+		&kubeconfigPhase{cfg: cfg, cluster: cluster, clients: deps.Clients, now: deps.Now, source: func(ctx context.Context) ([]byte, *phase.Status, error) {
+			// The Secret is where the Cluster's objects are: the Bootstrap cluster until the
+			// pivot, the Management cluster after it.
+			s, err := loc.get(ctx)
+			if err != nil {
+				return nil, nil, err
+			}
+			if s.Location == LocationManagement {
+				return s.ManagementKC, nil, nil
+			}
+			return reach(ctx, cluster)
+		}},
 		&managementProvidersPhase{loc: loc, wanted: wanted, installer: deps.Providers},
 		&prerequisitesPhase{name: "management-before-apply", entries: forManagement, prereqs: deps.Prerequisites, kc: onManagement("kubeconfig")},
 		&movePhase{cfg: cfg, loc: loc, installer: deps.Providers, mover: deps.Mover, clients: deps.Clients},
