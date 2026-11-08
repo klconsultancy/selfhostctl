@@ -26,7 +26,8 @@ func TestBootstrapClusterAgainstDocker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer docker.Close()
+	// Cleanups run last-registered first: the client closes after the container is gone.
+	t.Cleanup(func() { _ = docker.Close() })
 
 	name := fmt.Sprintf("it%d", time.Now().Unix())
 	cfg, err := config.Parse("it.yaml", []byte("apiVersion: selfhostctl/v1alpha1\nkind: ManagementCluster\nmetadata:\n  name: "+name+"\n"))

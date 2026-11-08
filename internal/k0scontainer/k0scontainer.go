@@ -158,7 +158,7 @@ func (c *Cluster) pull(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("pull %s: %w", c.Spec.Image, err)
 	}
-	defer res.Close()
+	defer func() { _ = res.Close() }()
 	if err := res.Wait(ctx); err != nil {
 		return fmt.Errorf("pull %s: %w", c.Spec.Image, err)
 	}
@@ -216,7 +216,7 @@ func (c *Cluster) readFile(ctx context.Context, path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer res.Content.Close()
+	defer func() { _ = res.Content.Close() }()
 	tr := tar.NewReader(res.Content)
 	if _, err := tr.Next(); err != nil {
 		return nil, fmt.Errorf("read %s from %s: %w", path, c.Spec.Name, err)

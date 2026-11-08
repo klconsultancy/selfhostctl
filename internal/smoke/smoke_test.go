@@ -50,11 +50,11 @@ const (
 func TestLibrariesTogether(t *testing.T) {
 	ctx := t.Context()
 
-	docker, err := client.New(client.FromEnv, client.WithAPIVersionNegotiation())
+	docker, err := client.New(client.FromEnv)
 	if err != nil {
 		t.Fatalf("docker client: %v", err)
 	}
-	defer docker.Close()
+	defer func() { _ = docker.Close() }()
 	if _, err := docker.Ping(ctx, client.PingOptions{}); err != nil {
 		t.Fatalf("docker ping: %v", err)
 	}
@@ -207,7 +207,7 @@ func readFile(ctx context.Context, docker *client.Client, id, path string) ([]by
 	if err != nil {
 		return nil, err
 	}
-	defer res.Content.Close()
+	defer func() { _ = res.Content.Close() }()
 	tr := tar.NewReader(res.Content)
 	if _, err := tr.Next(); err != nil {
 		return nil, err

@@ -59,7 +59,7 @@ func New(env Env) (*client.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	opts := []client.Opt{client.FromEnv, client.WithAPIVersionNegotiation()}
+	opts := []client.Opt{client.FromEnv}
 	if host != "" {
 		opts = append(opts, client.WithHost(host))
 	}
