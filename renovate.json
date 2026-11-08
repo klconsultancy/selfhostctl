@@ -50,10 +50,15 @@
       "groupName": "golangci-lint"
     },
     {
-      "description": "Each release is built against exactly one CAPI minor (see the support matrix in the README), so a new CAPI minor is raised by hand, as its own release; only its patch releases come from here.",
-      "matchPackageNames": ["sigs.k8s.io/cluster-api"],
+      "description": "Each release is built against exactly one CAPI minor (see the support matrix in the README), so a new CAPI minor is raised by hand, as its own release; only its patch releases come from here. The Kubernetes libraries and Helm follow that minor's k8s.io line (docs/adr/0001-core-libraries.md), so their minors are raised with it.",
+      "matchPackageNames": ["sigs.k8s.io/cluster-api", "sigs.k8s.io/cluster-api/api", "sigs.k8s.io/controller-runtime", "k8s.io/**", "helm.sh/helm/v4"],
       "matchUpdateTypes": ["major", "minor"],
       "enabled": false
+    },
+    {
+      "description": "CAPI and the replace of its api module move together (docs/adr/0001-core-libraries.md).",
+      "matchPackageNames": ["sigs.k8s.io/cluster-api", "sigs.k8s.io/cluster-api/api"],
+      "groupName": "cluster-api"
     },
     {
       "description": "A new Go minor version is raised by hand, in go.mod and the dev container together; only its patch releases and digests come from here.",
