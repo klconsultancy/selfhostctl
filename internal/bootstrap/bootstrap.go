@@ -55,7 +55,7 @@ type Deps struct {
 	// First is `bootstrap --first`: the operator asserts no Management cluster exists
 	// yet, so a Bootstrap cluster may be created without a handle proving it.
 	First bool
-	// Probe reports whether something answers TLS at host:port; ProbeTLS when nil.
+	// Probe reports whether something accepts connections at host:port; ProbeEndpoint when nil.
 	Probe func(ctx context.Context, hostport string) bool
 	// Now is time.Now outside tests.
 	Now func() time.Time
@@ -72,7 +72,7 @@ func (d *Deps) defaults() {
 		d.ClusterReadyTimeout = 30 * time.Minute
 	}
 	if d.Probe == nil {
-		d.Probe = ProbeTLS
+		d.Probe = ProbeEndpoint
 	}
 	if d.Now == nil {
 		d.Now = time.Now

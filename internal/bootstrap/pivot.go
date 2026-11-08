@@ -80,7 +80,7 @@ func (g guardedBootstrapCluster) Status(ctx context.Context) (phase.Status, erro
 		return phase.Status{State: phase.Blocked, Reason: s.Reason}, nil
 	case s.Location == LocationUnknown && !s.BootstrapExists:
 		if ep := g.loc.knownEndpoint(); ep != "" && g.loc.probe(ctx, ep) {
-			return phase.Status{State: phase.Blocked, Reason: fmt.Sprintf("something answers TLS at %s, the Management cluster's endpoint, so --first is refused: a Management cluster may run there", ep)}, nil
+			return phase.Status{State: phase.Blocked, Reason: fmt.Sprintf("something accepts connections at %s, the Management cluster's endpoint, so --first is refused: a Management cluster may run there", ep)}, nil
 		}
 	}
 	return g.Phase.Status(ctx)

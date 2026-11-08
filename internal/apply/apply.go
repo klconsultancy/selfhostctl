@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -117,8 +118,7 @@ func InPlace(ctx context.Context, c ctrlclient.Client, objs []*unstructured.Unst
 			return false, describe(obj, err, redact)
 		}
 		dry := obj.DeepCopy()
-		if err := c.Apply(ctx, ctrlclient.ApplyConfigurationFromUnstructured(dry),
-			ctrlclient.FieldOwner(FieldManager), ctrlclient.ForceOwnership, ctrlclient.DryRunAll); err != nil {
+		if err := applyOne(ctx, c, dry, ctrlclient.DryRunAll); err != nil {
 			return false, describe(obj, err, redact)
 		}
 		if dry.GetResourceVersion() != live.GetResourceVersion() {
@@ -131,12 +131,44 @@ func InPlace(ctx context.Context, c ctrlclient.Client, objs []*unstructured.Unst
 // Objects applies every object server-side, in order.
 func Objects(ctx context.Context, c ctrlclient.Client, objs []*unstructured.Unstructured, redact Redactor) error {
 	for _, obj := range objs {
-		if err := c.Apply(ctx, ctrlclient.ApplyConfigurationFromUnstructured(obj.DeepCopy()),
-			ctrlclient.FieldOwner(FieldManager), ctrlclient.ForceOwnership); err != nil {
+		if err := applyOne(ctx, c, obj.DeepCopy()); err != nil {
 			return describe(obj, err, redact)
 		}
 	}
 	return nil
+}
+
+// WebhookWait bounds how long an apply waits for an admission webhook that isn't served
+// yet: right after providers are installed, their Deployments can be Available before
+// the webhook Service has endpoints.
+var WebhookWait = 3 * time.Minute
+
+// applyOne applies obj server-side, retrying while an admission webhook can't be
+// reached. Every other error returns at once.
+func applyOne(ctx context.Context, c ctrlclient.Client, obj *unstructured.Unstructured, opts ...ctrlclient.ApplyOption) error {
+	opts = append([]ctrlclient.ApplyOption{ctrlclient.FieldOwner(FieldManager), ctrlclient.ForceOwnership}, opts...)
+	deadline := time.Now().Add(WebhookWait)
+	for {
+		err := c.Apply(ctx, ctrlclient.ApplyConfigurationFromUnstructured(obj), opts...)
+		if err == nil || !webhookUnreachable(err) || time.Now().After(deadline) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(3 * time.Second):
+		}
+	}
+}
+
+// webhookUnreachable: the API server couldn't call an admission webhook, as opposed to
+// the webhook rejecting the object.
+func webhookUnreachable(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "failed calling webhook") &&
+		(strings.Contains(msg, "connection refused") || strings.Contains(msg, "no endpoints available") ||
+			strings.Contains(msg, "i/o timeout") || strings.Contains(msg, "context deadline exceeded") ||
+			strings.Contains(msg, "x509:") || strings.Contains(msg, "EOF"))
 }
 
 // describe names the object in an error, then redacts all of it: object names can

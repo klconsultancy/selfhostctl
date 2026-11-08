@@ -74,6 +74,6 @@ Agreed 2026-11-08, for #9 onwards.
 | kubeconfig present, `locate` → `none` | creates the Bootstrap cluster |
 | no kubeconfig | blocked: "no kubeconfig at `<path>`: copy it there, or run with `--first` if this is the cluster's first bootstrap" |
 | `--first` | creates it; covers only that run |
-| `--first`, and a known endpoint (from the manifests, e.g. a ProxmoxCluster) answers TLS | refused |
+| `--first`, and a known endpoint (from the manifests, e.g. a ProxmoxCluster) accepts connections | refused |
 
 **#9 adds:** the e2e runs `bootstrap` after the pivot (nothing runs, no Bootstrap cluster appears) and without the kubeconfig (blocked). `recovery export` also works from the Management cluster.

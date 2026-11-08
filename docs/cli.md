@@ -36,7 +36,7 @@ The config is described in [config.md](config.md). Terms such as Phase, Manual c
 
 **Fail closed.** The handle to the Management cluster is its kubeconfig (`cluster.kubeconfig`). Without one, nothing proves there is no Management cluster yet, so `bootstrap-cluster` is blocked unless you run `bootstrap --first`. `--first` covers only that run, and is refused when:
 - a kubeconfig exists but its cluster doesn't answer: a network blip (run again), a lost cluster (`recover`) or a stale file (remove it);
-- the endpoint known from the manifests (e.g. a ProxmoxCluster's) answers TLS.
+- the endpoint known from the manifests (e.g. a ProxmoxCluster's) accepts connections.
 
 `pivot` runs bootstrap's phases from `management-providers`. `providers adopt` stamps a Management cluster's providers, installed some other way, with the config's variables fingerprint, after checking their versions. Run it only if they run with exactly `providers.variables`.
 

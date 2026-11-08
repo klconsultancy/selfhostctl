@@ -2,7 +2,6 @@ package bootstrap
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -63,7 +62,7 @@ type locator struct {
 	cfg     *config.ManagementCluster
 	cluster *k0scontainer.Cluster
 	clients Clients
-	// probe reports whether something answers TLS at host:port.
+	// probe reports whether something accepts connections at host:port.
 	probe func(ctx context.Context, hostport string) bool
 
 	mu  sync.Mutex
@@ -218,10 +217,11 @@ func asPort(v any) int64 {
 	return 0
 }
 
-// ProbeTLS reports whether anything completes a TLS handshake at hostport: any answer
-// counts, whatever its certificate.
-func ProbeTLS(ctx context.Context, hostport string) bool {
-	d := &tls.Dialer{NetDialer: &net.Dialer{Timeout: 5 * time.Second}, Config: &tls.Config{InsecureSkipVerify: true}} //nolint:gosec // only whether something answers
+// ProbeEndpoint reports whether anything accepts a connection at hostport. That is
+// enough to refuse --first: a Management cluster may run there. No TLS: nothing is
+// sent, and no certificate needs trusting.
+func ProbeEndpoint(ctx context.Context, hostport string) bool {
+	d := &net.Dialer{Timeout: 5 * time.Second}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	conn, err := d.DialContext(ctx, "tcp", hostport)
