@@ -29,5 +29,6 @@ The proof ran both side by side, through bootstrap, pivot and recovery (run 4249
 
 - The PRD's `bootstrapCluster.kindConfig` goes. What the Bootstrap cluster needs from the config (extra mounts, e.g. the Docker socket for CAPD) is declared on the container.
 - The Docker SDK reads `DOCKER_HOST`, never the Docker CLI's contexts. On colima, Docker Desktop and Rancher Desktop the daemon is reached through a context, so the tool resolves the active context's endpoint itself (#4). Until then, the smoke test needs `DOCKER_HOST`.
+- Helm stays a minor behind its newest release, so its dependencies can lag behind security fixes that only the newer Helm takes in. Such a dependency is raised directly in `go.mod`, within its own minor and with the advisory named, as `oras.land/oras-go/v2` is for v4.2.4. Dependency review in CI catches them.
 - A first run of clusterctl's `Init` adds kubeadm's latest bootstrap and control-plane providers for any type left empty. The tool always passes every type explicitly.
 - Open: k0s in Docker on Docker Desktop for macOS is unproven. Colima and the GitHub-hosted runners work.
