@@ -1,0 +1,36 @@
+name: Bug report
+description: A phase does something wrong, or a command fails or refuses when it shouldn't.
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: The command you ran, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: Output of `selfhostctl status`
+      render: text
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: The command's output around the failure. Remove keys, tokens and other secrets.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: selfhostctl version
+    validations:
+      required: true
+  - type: textarea
+    id: providers
+    attributes:
+      label: Providers and versions
+      description: The `providers` section of your config.
+      render: yaml
+    validations:
+      required: true

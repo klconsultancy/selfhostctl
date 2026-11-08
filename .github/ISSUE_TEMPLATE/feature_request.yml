@@ -1,0 +1,19 @@
+name: Feature request
+description: A lifecycle step, provider adapter or recovery profile the tool should support.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The tool covers only the lifecycle of one self-managed management cluster (see [Scope](https://github.com/klconsultancy/selfhostctl#scope)). Requests to manage workload clusters or to talk to a secret store will be declined.
+  - type: textarea
+    id: need
+    attributes:
+      label: What you need
+      description: The situation, the providers involved and their versions, and what you do by hand today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: How the tool should handle it

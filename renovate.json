@@ -1,0 +1,70 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", "helpers:pinGitHubActionDigests"],
+  "description": "Updates come on the 1st and the 15th, grouped, and are merged once main's required checks pass, unless they raise a major version. release-please collects the fix(deps) ones, of what the binary contains, in the release pull request, which is merged by hand.",
+  "timezone": "Europe/Brussels",
+  "schedule": ["* 0-8 1,15 * *"],
+  "platformCommit": "enabled",
+  "semanticCommits": "enabled",
+  "automerge": true,
+  "platformAutomerge": true,
+  "automergeType": "pr",
+  "rebaseWhen": "behind-base-branch",
+  "postUpdateOptions": ["gomodTidy"],
+  "vulnerabilityAlerts": {
+    "description": "Security fixes come at once, outside the schedule.",
+    "schedule": ["at any time"]
+  },
+  "customManagers": [
+    {
+      "description": "golangci-lint's version in CI, kept the same as the dev container's.",
+      "customType": "regex",
+      "managerFilePatterns": ["/^\\.github/workflows/ci\\.yml$/"],
+      "matchStrings": ["golangci-lint-action@[^\\n]+\\n(?:\\s+.+\\n)*?\\s+version: (?<currentValue>v\\S+)"],
+      "depNameTemplate": "golangci/golangci-lint",
+      "datasourceTemplate": "docker"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "The modules end up in the binary, so an update is a fix release-please releases.",
+      "matchFileNames": ["go.mod"],
+      "semanticCommitType": "fix",
+      "groupName": "binary"
+    },
+    {
+      "description": "The dev container, which no release contains.",
+      "matchFileNames": [".devcontainer/**"],
+      "semanticCommitType": "build",
+      "groupName": "devcontainer"
+    },
+    {
+      "matchManagers": ["github-actions"],
+      "semanticCommitType": "ci",
+      "groupName": "actions"
+    },
+    {
+      "description": "golangci-lint in the dev container and in CI together, so they stay the same.",
+      "matchPackageNames": ["golangci/golangci-lint"],
+      "semanticCommitType": "ci",
+      "groupName": "golangci-lint"
+    },
+    {
+      "description": "Each release is built against exactly one CAPI minor (see the support matrix in the README), so a new CAPI minor is raised by hand, as its own release; only its patch releases come from here.",
+      "matchPackageNames": ["sigs.k8s.io/cluster-api"],
+      "matchUpdateTypes": ["major", "minor"],
+      "enabled": false
+    },
+    {
+      "description": "A new Go minor version is raised by hand, in go.mod and the dev container together; only its patch releases and digests come from here.",
+      "matchPackageNames": ["go", "golang"],
+      "matchUpdateTypes": ["major", "minor"],
+      "enabled": false
+    },
+    {
+      "description": "A major version waits for review.",
+      "matchUpdateTypes": ["major"],
+      "automerge": false
+    }
+  ]
+}

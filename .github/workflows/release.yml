@@ -1,0 +1,79 @@
+name: Release
+
+# release-please keeps a release pull request open with the next version and its
+# changelog, from the Conventional Commits titles on main. Merging it tags the
+# release, which builds the binaries and adds them, with their checksums, to the
+# GitHub release.
+#
+# A release candidate is a tag such as v1.2.3-rc.1 on main, pushed by an admin (the
+# "release tags" ruleset): it builds the binaries the same way, as a pre-release, so
+# they can be tested before the release pull request is merged.
+on:
+  push:
+    branches: [main]
+    tags: ["v[0-9]+.[0-9]+.[0-9]+-rc.[0-9]+"]
+
+permissions: {}
+
+jobs:
+  release-please:
+    name: Release PR
+    if: github.ref_type == 'branch'
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      # A GitHub App token instead of GITHUB_TOKEN, so CI runs on the release PR. The
+      # app may also create the version tags the "release tags" ruleset protects.
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        id: app-token
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        id: release
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+
+  binaries:
+    needs: release-please
+    # always(): on a release candidate's tag, release-please is skipped.
+    if: always() && (needs.release-please.outputs.release_created == 'true' || github.ref_type == 'tag')
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ needs.release-please.outputs.tag_name || github.ref_name }}
+    permissions:
+      contents: write # the GitHub release
+      id-token: write # signing the attestation
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.TAG }}
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: scripts/build.sh "$TAG"
+      # A signed build provenance attestation of each binary, checked with
+      # `gh attestation verify`.
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: dist/checksums.txt
+          create-storage-record: false
+      # release-please made the release; a release candidate gets a pre-release here.
+      - name: Add the binaries to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          header="Verify a binary with \`gh attestation verify <file> --repo $GITHUB_REPOSITORY\`, or its checksum against \`checksums.txt\`."
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease --generate-notes --notes "$header"
+          else
+            changelog=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body --jq .body)
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes "$header
+
+          $changelog"
+          fi
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" dist/*
