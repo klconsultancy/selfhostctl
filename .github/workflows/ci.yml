@@ -53,8 +53,9 @@ jobs:
       - run: scripts/build.sh ci
       - run: test "$(dist/selfhostctl_ci_linux_amd64 version)" = ci
 
-  # The libraries against a real Bootstrap cluster (docs/adr/0001-core-libraries.md):
-  # a k0s container through the Docker SDK, clusterctl init, a Helm install.
+  # Everything behind the integration tag, against the runner's Docker: the libraries
+  # smoke test (docs/adr/0001-core-libraries.md) and the phases against a real
+  # Bootstrap cluster.
   integration:
     runs-on: ubuntu-latest
     steps:
@@ -64,7 +65,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - run: go test -tags integration -count=1 -timeout 15m ./internal/smoke/
+      - run: go test -tags integration -count=1 -timeout 15m ./...
         env:
           # Only lifts clusterctl's GitHub rate limit for its release downloads.
           GITHUB_TOKEN: ${{ github.token }}

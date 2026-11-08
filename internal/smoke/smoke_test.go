@@ -36,23 +36,25 @@ import (
 	clusterctlv1 "sigs.k8s.io/cluster-api/cmd/clusterctl/api/v1alpha3"
 	clusterctlclient "sigs.k8s.io/cluster-api/cmd/clusterctl/client"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/klconsultancy/selfhostctl/internal/bootstrap"
 )
 
 const (
 	// The core version this release line is built against (the support matrix).
 	capiVersion = "v1.14.4"
-	// The Bootstrap cluster's k0s, pinned per tool release like the core.
-	bootstrapImage = "docker.io/k0sproject/k0s:v1.36.5-k0s.0"
+	// The Bootstrap cluster's k0s, the one the tool pins.
+	bootstrapImage = bootstrap.Image
 )
 
 func TestLibrariesTogether(t *testing.T) {
 	ctx := t.Context()
 
-	docker, err := client.New(client.FromEnv, client.WithAPIVersionNegotiation())
+	docker, err := client.New(client.FromEnv)
 	if err != nil {
 		t.Fatalf("docker client: %v", err)
 	}
-	defer docker.Close()
+	defer func() { _ = docker.Close() }()
 	if _, err := docker.Ping(ctx, client.PingOptions{}); err != nil {
 		t.Fatalf("docker ping: %v", err)
 	}
@@ -205,7 +207,7 @@ func readFile(ctx context.Context, docker *client.Client, id, path string) ([]by
 	if err != nil {
 		return nil, err
 	}
-	defer res.Content.Close()
+	defer func() { _ = res.Content.Close() }()
 	tr := tar.NewReader(res.Content)
 	if _, err := tr.Next(); err != nil {
 		return nil, err

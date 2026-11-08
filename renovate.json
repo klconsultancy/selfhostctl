@@ -17,6 +17,15 @@
   },
   "customManagers": [
     {
+      "description": "The Bootstrap cluster's k0s image, pinned in code per release (docs/adr/0001-core-libraries.md).",
+      "customType": "regex",
+      "managerFilePatterns": ["/^internal/bootstrap/bootstrap\\.go$/"],
+      "matchStrings": ["Image = \"docker\\.io/k0sproject/k0s:(?<currentValue>v[^\"]+)\""],
+      "depNameTemplate": "docker.io/k0sproject/k0s",
+      "datasourceTemplate": "docker",
+      "versioningTemplate": "regex:^v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)-k0s\\.(?<build>\\d+)$"
+    },
+    {
       "description": "govulncheck's version in the workflows.",
       "customType": "regex",
       "managerFilePatterns": ["/^\\.github/workflows/(ci|govulncheck)\\.yml$/"],
@@ -34,6 +43,17 @@
     }
   ],
   "packageRules": [
+    {
+      "description": "The Bootstrap cluster's k0s ships in the binary, so an update is a fix release-please releases. A new Kubernetes minor is raised by hand, with the CAPI minor that supports it.",
+      "matchPackageNames": ["docker.io/k0sproject/k0s"],
+      "semanticCommitType": "fix",
+      "groupName": "bootstrap-cluster"
+    },
+    {
+      "matchPackageNames": ["docker.io/k0sproject/k0s"],
+      "matchUpdateTypes": ["major", "minor"],
+      "enabled": false
+    },
     {
       "description": "The modules end up in the binary, so an update is a fix release-please releases.",
       "matchFileNames": ["go.mod"],
