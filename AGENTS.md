@@ -12,4 +12,4 @@ The five default triage labels, each named after its role (`needs-triage`, `need
 
 ### Domain docs
 
-Single-context: one `GLOSSARY.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+One `GLOSSARY.md` and one design document, `docs/design.md`, at the repo root. No ADRs. See `docs/agents/domain.md`.

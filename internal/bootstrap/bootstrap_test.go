@@ -95,9 +95,7 @@ func (d *fakeDocker) NetworkCreate(context.Context, string, client.NetworkCreate
 	panic("the network exists")
 }
 
-func testConfig(t *testing.T, mounts string) *config.ManagementCluster {
-	t.Helper()
-	c, err := config.Parse("test.yaml", []byte(`
+const testYAML = `
 apiVersion: selfhostctl/v1alpha1
 kind: ManagementCluster
 metadata:
@@ -106,9 +104,16 @@ providers:
   bootstrap: [{name: k0sproject-k0smotron, version: v2.3.0}]
   controlPlane: [{name: k0sproject-k0smotron, version: v2.3.0}]
   infrastructure: [{name: docker, version: v1.14.4}]
+cluster:
+  manifests: cluster.yaml
+  namespace: mgmt
 bootstrapCluster:
   network: kind
-`+mounts))
+`
+
+func testConfig(t *testing.T, more string) *config.ManagementCluster {
+	t.Helper()
+	c, err := config.Parse("test.yaml", []byte(testYAML+more))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,13 +164,13 @@ func TestProvidersPhase(t *testing.T) {
 		t.Fatalf("providers before the Bootstrap cluster: %v %v, want blocked on it", st, err)
 	}
 
-	if err := phase.Run(t.Context(), Phases(cfg, dp), "", io.Discard); err != nil {
+	if err := phase.Run(t.Context(), Phases(cfg, dp)[:2], "", io.Discard); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if len(inst.inits) != 1 {
 		t.Fatalf("clusterctl init ran %d times, want once", len(inst.inits))
 	}
-	if err := phase.Run(t.Context(), Phases(cfg, dp), "", io.Discard); err != nil || len(inst.inits) != 1 {
+	if err := phase.Run(t.Context(), Phases(cfg, dp)[:2], "", io.Discard); err != nil || len(inst.inits) != 1 {
 		t.Errorf("second run: %v, init ran %d times", err, len(inst.inits))
 	}
 
@@ -183,7 +188,7 @@ func TestBootstrapClusterPhase(t *testing.T) {
 	if st, err := p.Status(t.Context()); err != nil || st.State != phase.Next {
 		t.Fatalf("before: %v, %v; want next", st, err)
 	}
-	if err := phase.Run(t.Context(), Phases(testConfig(t, ""), deps(d, &kubeconfigs)), "", io.Discard); err != nil {
+	if err := phase.Run(t.Context(), Phases(testConfig(t, ""), deps(d, &kubeconfigs))[:1], "", io.Discard); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if len(d.created) != 1 {
@@ -211,7 +216,7 @@ func TestBootstrapClusterPhase(t *testing.T) {
 	}
 
 	// A second run changes nothing.
-	if err := phase.Run(t.Context(), Phases(testConfig(t, ""), deps(d, &kubeconfigs)), "", io.Discard); err != nil || len(d.created) != 1 {
+	if err := phase.Run(t.Context(), Phases(testConfig(t, ""), deps(d, &kubeconfigs))[:1], "", io.Discard); err != nil || len(d.created) != 1 {
 		t.Errorf("second run: %v, created %d", err, len(d.created))
 	}
 }
@@ -220,7 +225,7 @@ func TestBootstrapClusterPhaseMountsOnlyWhatIsDeclared(t *testing.T) {
 	d := newFakeDocker()
 	var kubeconfigs []string
 	cfg := testConfig(t, "  extraMounts:\n    - hostPath: /var/run/docker.sock\n      containerPath: /var/run/docker.sock\n")
-	if err := phase.Run(t.Context(), Phases(cfg, deps(d, &kubeconfigs)), "", io.Discard); err != nil {
+	if err := phase.Run(t.Context(), Phases(cfg, deps(d, &kubeconfigs))[:1], "", io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	m := d.created[0].HostConfig.Mounts
@@ -233,7 +238,7 @@ func TestBootstrapClusterPhaseStartsAStoppedContainer(t *testing.T) {
 	d := newFakeDocker()
 	d.containers["selfhostctl-mgmt-bootstrap"] = &fakeContainer{image: Image}
 	var kubeconfigs []string
-	if err := phase.Run(t.Context(), Phases(testConfig(t, ""), deps(d, &kubeconfigs)), "", io.Discard); err != nil {
+	if err := phase.Run(t.Context(), Phases(testConfig(t, ""), deps(d, &kubeconfigs))[:1], "", io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	if len(d.created) != 0 || !d.containers["selfhostctl-mgmt-bootstrap"].running {
@@ -281,7 +286,7 @@ func TestBeforeApplyPhase(t *testing.T) {
   - manifest: {path: only-target.yaml}
     clusters: [management]
 `)
-	if err := phase.Run(t.Context(), Phases(cfg, dp), "", io.Discard); err != nil {
+	if err := phase.Run(t.Context(), Phases(cfg, dp)[:3], "", io.Discard); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	// b was done already; only-target is not for the Bootstrap cluster.

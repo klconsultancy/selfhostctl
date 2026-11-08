@@ -54,7 +54,7 @@ jobs:
       - run: test "$(dist/selfhostctl_ci_linux_amd64 version)" = ci
 
   # Everything behind the integration tag, against the runner's Docker: the libraries
-  # smoke test (docs/adr/0001-core-libraries.md) and the phases against a real
+  # smoke test (docs/design.md#libraries) and the phases against a real
   # Bootstrap cluster.
   integration:
     runs-on: ubuntu-latest
@@ -66,6 +66,29 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go test -tags integration -count=1 -timeout 15m ./...
+        env:
+          # Only lifts clusterctl's GitHub rate limit for its release downloads.
+          GITHUB_TOKEN: ${{ github.token }}
+
+  # The tool's own command line on CAPD + k0smotron + kine: bootstrap to a Ready
+  # Management cluster, through the Recovery bundle checkpoint (test/e2e/run.sh).
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # kind's known-issues values: the runner's defaults run out with a Bootstrap
+      # cluster, machines and their pods side by side.
+      - name: inotify limits
+        run: |
+          sudo sysctl -w fs.inotify.max_user_watches=524288
+          sudo sysctl -w fs.inotify.max_user_instances=512
+      - run: test/e2e/run.sh
         env:
           # Only lifts clusterctl's GitHub rate limit for its release downloads.
           GITHUB_TOKEN: ${{ github.token }}
@@ -97,7 +120,7 @@ jobs:
   ci-success:
     name: CI success
     if: always()
-    needs: [lint, test, build, integration, govulncheck, dependency-review]
+    needs: [lint, test, build, integration, e2e, govulncheck, dependency-review]
     runs-on: ubuntu-latest
     steps:
       - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')

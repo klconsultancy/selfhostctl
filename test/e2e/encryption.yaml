@@ -1,0 +1,27 @@
+# The machines' encryption config, from the environment (beforeApply), with the
+# label that makes clusterctl move carry it. beforeApply runs before the cluster's
+# manifests, so it brings the namespace too.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mgmt
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mgmt-bootstrap
+  namespace: mgmt
+  labels:
+    clusterctl.cluster.x-k8s.io/move: ""
+stringData:
+  encryption-config.yaml: |
+    apiVersion: apiserver.config.k8s.io/v1
+    kind: EncryptionConfiguration
+    resources:
+      - resources: [secrets]
+        providers:
+          - aescbc:
+              keys:
+                - name: key1
+                  secret: ${E2E_ENCRYPTION_KEY}
+          - identity: {}

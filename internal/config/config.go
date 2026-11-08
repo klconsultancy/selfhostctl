@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -35,10 +36,76 @@ type ManagementCluster struct {
 	// BeforeApply is installed before the cluster is applied, e.g. an API proxy the
 	// infrastructure provider talks to, or a Secret the machines read at boot.
 	BeforeApply []Prerequisite `json:"beforeApply,omitempty"`
+	// Cluster is the Management cluster's own definition.
+	Cluster Cluster `json:"cluster"`
+	// Recovery is how the Management cluster is recovered when its machines are gone.
+	// Without it, bootstrap doesn't ask for a Recovery bundle.
+	Recovery *Recovery `json:"recovery,omitempty"`
 
 	// dir is the config file's directory; relative paths in the config are relative to
 	// it.
 	dir string
+}
+
+// Cluster is the Management cluster's definition and where its objects live.
+type Cluster struct {
+	// Manifests is a kustomization directory, a directory of YAML files, or one file:
+	// the Cluster, its control plane, infrastructure and machine templates.
+	Manifests string `json:"manifests"`
+	// Namespace of the Cluster object: the one namespace a move covers.
+	Namespace string `json:"namespace"`
+	// Name of the Cluster object; metadata.name when empty.
+	Name string `json:"name,omitempty"`
+	// Kubeconfig is where bootstrap writes the Management cluster's admin kubeconfig;
+	// ~/.kube/<metadata.name>.kubeconfig when empty.
+	Kubeconfig string `json:"kubeconfig,omitempty"`
+}
+
+// ProfileK0smotronKine is the one recovery profile the tool has.
+const ProfileK0smotronKine = "k0smotron-kine"
+
+// Recovery names the recovery profile and the environment variables a Recovery reads.
+// None of them is required to start a bootstrap: the bootstrap's recovery-bundle
+// checkpoint checks them before it finishes.
+type Recovery struct {
+	Profile string `json:"profile"`
+	// BundleFromEnv is the variable holding the Recovery bundle, as `selfhostctl
+	// recovery export` writes it.
+	BundleFromEnv string `json:"bundleFromEnv"`
+	// EncryptionKeyFromEnv is the variable holding the key Secrets are encrypted with
+	// at rest in the datastore.
+	EncryptionKeyFromEnv string `json:"encryptionKeyFromEnv"`
+	Kine                 *Kine  `json:"kine,omitempty"`
+}
+
+type Kine struct {
+	// DatasourceFromEnv is the variable holding kine's data source, e.g.
+	// postgres://user:password@host:5432/db.
+	DatasourceFromEnv string `json:"datasourceFromEnv"`
+}
+
+// ClusterName is the Management cluster's Cluster object's name.
+func (c *ManagementCluster) ClusterName() string {
+	if c.Cluster.Name != "" {
+		return c.Cluster.Name
+	}
+	return c.Metadata.Name
+}
+
+// KubeconfigPath is where bootstrap writes the admin kubeconfig, ~ expanded.
+func (c *ManagementCluster) KubeconfigPath() (string, error) {
+	p := c.Cluster.Kubeconfig
+	if p == "" {
+		p = "~/.kube/" + c.Metadata.Name + ".kubeconfig"
+	}
+	if rest, ok := strings.CutPrefix(p, "~/"); ok {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(home, rest), nil
+	}
+	return c.Path(p), nil
 }
 
 // The clusters a Prerequisite can be installed on.
@@ -177,6 +244,9 @@ func Load(file string) (*ManagementCluster, error) {
 // checkFiles: every file the config names exists.
 func (c *ManagementCluster) checkFiles() []string {
 	var problems []string
+	if _, err := os.Stat(c.Path(c.Cluster.Manifests)); err != nil {
+		problems = append(problems, fmt.Sprintf("cluster.manifests: %v", err))
+	}
 	for i, p := range c.BeforeApply {
 		at := fmt.Sprintf("beforeApply[%d]", i)
 		var files []string
@@ -304,6 +374,31 @@ func (c *ManagementCluster) validate() []string {
 		problems = append(problems, fmt.Sprintf("metadata.name: %q must be a lowercase DNS label of at most 40 characters", c.Metadata.Name))
 	}
 	problems = append(problems, c.Providers.validate()...)
+	if c.Cluster.Manifests == "" {
+		problems = append(problems, "cluster.manifests: required")
+	}
+	if !dnsLabel.MatchString(c.Cluster.Namespace) {
+		problems = append(problems, fmt.Sprintf("cluster.namespace: %q must be a lowercase DNS label", c.Cluster.Namespace))
+	}
+	if c.Cluster.Name != "" && !dnsLabel.MatchString(c.Cluster.Name) {
+		problems = append(problems, fmt.Sprintf("cluster.name: %q must be a lowercase DNS label", c.Cluster.Name))
+	}
+	if r := c.Recovery; r != nil {
+		if r.Profile != ProfileK0smotronKine {
+			problems = append(problems, fmt.Sprintf("recovery.profile: %q, the tool has only %q", r.Profile, ProfileK0smotronKine))
+		}
+		names := map[string]string{"recovery.bundleFromEnv": r.BundleFromEnv, "recovery.encryptionKeyFromEnv": r.EncryptionKeyFromEnv}
+		if r.Kine == nil {
+			problems = append(problems, "recovery.kine: required for profile "+ProfileK0smotronKine)
+		} else {
+			names["recovery.kine.datasourceFromEnv"] = r.Kine.DatasourceFromEnv
+		}
+		for _, field := range slices.Sorted(maps.Keys(names)) {
+			if !envName.MatchString(names[field]) {
+				problems = append(problems, fmt.Sprintf("%s: %q is not an environment variable name", field, names[field]))
+			}
+		}
+	}
 	for i, p := range c.BeforeApply {
 		problems = append(problems, p.validate(fmt.Sprintf("beforeApply[%d]", i))...)
 	}
@@ -352,6 +447,8 @@ func (p Prerequisite) validate(at string) []string {
 	}
 	return problems
 }
+
+var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 var providerVersion = regexp.MustCompile(`^v\d+\.\d+\.\d+([-+][0-9A-Za-z.+-]+)?$`)
 

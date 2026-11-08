@@ -8,7 +8,7 @@ import (
 )
 
 // CAPIVersion is the Cluster API core this release installs and manages. It matches
-// the sigs.k8s.io/cluster-api module in go.mod (docs/adr/0001-core-libraries.md).
+// the sigs.k8s.io/cluster-api module in go.mod (docs/design.md#libraries).
 const CAPIVersion = "v1.14.4"
 
 // ClusterTopologyGateNeeded reports whether the core still needs CLUSTER_TOPOLOGY=true

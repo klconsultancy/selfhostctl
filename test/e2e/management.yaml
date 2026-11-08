@@ -1,0 +1,28 @@
+# The e2e's config: the tool's own command line against CAPD + k0smotron + kine on the
+# CI runner's Docker (test/e2e/run.sh).
+apiVersion: selfhostctl/v1alpha1
+kind: ManagementCluster
+metadata:
+  name: mgmt
+providers:
+  bootstrap: [{name: k0sproject-k0smotron, version: v2.3.0}]
+  controlPlane: [{name: k0sproject-k0smotron, version: v2.3.0}]
+  infrastructure: [{name: docker, version: v1.14.4}]
+bootstrapCluster:
+  # CAPD puts its machines on kind and creates them through the host's Docker.
+  network: kind
+  extraMounts:
+    - hostPath: /var/run/docker.sock
+      containerPath: /var/run/docker.sock
+beforeApply:
+  - manifest: {path: encryption.yaml}
+    clusters: [bootstrap]
+cluster:
+  manifests: cluster
+  namespace: mgmt
+  kubeconfig: .work/mgmt.kubeconfig
+recovery:
+  profile: k0smotron-kine
+  bundleFromEnv: E2E_RECOVERY_BUNDLE
+  encryptionKeyFromEnv: E2E_ENCRYPTION_KEY
+  kine: {datasourceFromEnv: E2E_KINE_DATASOURCE}
