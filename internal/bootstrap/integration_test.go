@@ -81,7 +81,7 @@ providers:
 		}
 		return strings.Join(s, " ")
 	}
-	if got, want := states(), "bootstrap-cluster=next providers=blocked"; got != want {
+	if got, want := states(), "bootstrap-cluster=next providers=blocked before-apply=done"; got != want {
 		t.Errorf("status before: %s, want %s", got, want)
 	}
 
@@ -96,7 +96,7 @@ providers:
 	if strings.Contains(out.String(), "running") {
 		t.Errorf("second run ran something:\n%s", out.String())
 	}
-	if got, want := states(), "bootstrap-cluster=done providers=done"; got != want {
+	if got, want := states(), "bootstrap-cluster=done providers=done before-apply=done"; got != want {
 		t.Errorf("status after: %s, want %s", got, want)
 	}
 
