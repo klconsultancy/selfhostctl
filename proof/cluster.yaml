@@ -1,0 +1,178 @@
+# The management cluster: a k0smotron control plane on kine (PostgreSQL in a container
+# on the kind network), on CAPD machines. Every machine is controller and worker, so the
+# providers run on it after the pivot. ${...} is filled in by proof.sh.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mgmt
+---
+# Secrets encryption at rest, as the first user runs it: the break-glass controller
+# needs the same key to read the datastore. The label makes `clusterctl move` carry it,
+# since the control plane names it only inside a file reference.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mgmt-bootstrap
+  namespace: mgmt
+  labels:
+    clusterctl.cluster.x-k8s.io/move: ""
+stringData:
+  encryption-config.yaml: |
+    apiVersion: apiserver.config.k8s.io/v1
+    kind: EncryptionConfiguration
+    resources:
+      - resources: [secrets]
+        providers:
+          - aescbc:
+              keys:
+                - name: key1
+                  secret: ${ENCRYPTION_KEY}
+          - identity: {}
+---
+apiVersion: cluster.x-k8s.io/v1beta2
+kind: Cluster
+metadata:
+  name: mgmt
+  namespace: mgmt
+spec:
+  clusterNetwork:
+    pods:
+      cidrBlocks: ["10.244.0.0/16"]
+    services:
+      cidrBlocks: ["10.96.0.0/12"]
+  infrastructureRef:
+    apiGroup: infrastructure.cluster.x-k8s.io
+    kind: DockerCluster
+    name: mgmt
+  controlPlaneRef:
+    apiGroup: controlplane.cluster.x-k8s.io
+    kind: K0sControlPlane
+    name: mgmt
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta2
+kind: DockerCluster
+metadata:
+  name: mgmt
+  namespace: mgmt
+spec:
+  loadBalancer:
+    customHAProxyConfigTemplateRef:
+      name: mgmt-haproxy
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1beta2
+kind: DockerMachineTemplate
+metadata:
+  name: mgmt-cp
+  namespace: mgmt
+spec:
+  template:
+    spec:
+      # Only the OS image: k0smotron installs k0s on it.
+      customImage: kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed
+      # CAPD in the cluster itself, after the pivot, creates machines through the
+      # host's Docker.
+      extraMounts:
+        - containerPath: /var/run/docker.sock
+          hostPath: /var/run/docker.sock
+---
+apiVersion: controlplane.cluster.x-k8s.io/v1beta2
+kind: K0sControlPlane
+metadata:
+  name: mgmt
+  namespace: mgmt
+spec:
+  replicas: ${REPLICAS}
+  version: ${K0S_VERSION}
+  k0sConfigSpec:
+    args:
+      - --enable-worker
+      - --no-taints
+    files:
+      - path: /etc/k0s/encryption-config.yaml
+        permissions: "0644"
+        contentFrom:
+          secretRef:
+            name: mgmt-bootstrap
+            key: encryption-config.yaml
+    k0s:
+      apiVersion: k0s.k0sproject.io/v1beta1
+      kind: ClusterConfig
+      metadata:
+        name: k0s
+      spec:
+        api:
+          extraArgs:
+            anonymous-auth: "true"
+            encryption-provider-config: /etc/k0s/encryption-config.yaml
+        storage:
+          type: kine
+          kine:
+            dataSource: ${KINE_DATASOURCE}
+        network:
+          podCIDR: 10.244.0.0/16
+          serviceCIDR: 10.96.0.0/12
+          controlPlaneLoadBalancing:
+            enabled: false
+        telemetry:
+          enabled: false
+  machineTemplate:
+    spec:
+      infrastructureRef:
+        apiGroup: infrastructure.cluster.x-k8s.io
+        kind: DockerMachineTemplate
+        name: mgmt-cp
+---
+# CAPD's load balancer, health-checking k0s's API servers over TLS (k0smotron's own
+# CAPD e2e template).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mgmt-haproxy
+  namespace: mgmt
+  labels:
+    clusterctl.cluster.x-k8s.io/move: ""
+data:
+  value: |
+    global
+      log /dev/log local0
+      log /dev/log local1 notice
+      daemon
+      maxconn 100000
+
+    resolvers docker
+      nameserver dns 127.0.0.11:53
+
+    defaults
+      log global
+      mode tcp
+      option dontlognull
+      timeout connect 5000
+      timeout client 50000
+      timeout server 50000
+      default-server init-addr none
+
+    frontend stats
+      mode http
+      bind *:8404
+      stats enable
+      stats uri /stats
+      stats refresh 1s
+      stats admin if TRUE
+
+    frontend control-plane
+      bind *:{{ .FrontendControlPlanePort }}
+      {{ if .IPv6 -}}
+      bind :::{{ .FrontendControlPlanePort }};
+      {{- end }}
+      default_backend kube-apiservers
+
+    backend kube-apiservers
+      default-server inter 2s fall 2 rise 3
+      timeout connect 2s
+      timeout server 5s
+      retries 3
+      option redispatch
+      option httpchk GET /healthz
+      {{range $server, $backend := .BackendServers}}
+      server {{ $server }} {{ JoinHostPort $backend.Address $.BackendControlPlanePort }} weight {{ $backend.Weight }} check check-ssl verify none resolvers docker resolve-prefer {{ if $.IPv6 -}} ipv6 {{- else -}} ipv4 {{- end }}
+      {{- end}}

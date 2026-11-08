@@ -1,0 +1,40 @@
+name: Proof
+
+# The PRD's first proof step (#1), throwaway: proof/proof.sh on a GitHub-hosted runner.
+# Lives on the proof branch only.
+on:
+  push:
+    branches: ["proof/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Tools
+        run: |
+          mkdir -p "$HOME/bin"
+          curl -fsSLo "$HOME/bin/kind" https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-amd64
+          curl -fsSLo "$HOME/bin/clusterctl" https://github.com/kubernetes-sigs/cluster-api/releases/download/v1.14.4/clusterctl-linux-amd64
+          curl -fsSLo "$HOME/bin/kubectl" https://dl.k8s.io/release/v1.36.4/bin/linux/amd64/kubectl
+          chmod +x "$HOME"/bin/*
+          echo "$HOME/bin" >>"$GITHUB_PATH"
+      - run: docker info --format '{{.MemTotal}} bytes, {{.NCPU}} CPUs, cgroup {{.CgroupVersion}}'
+      - name: Proof
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: proof/proof.sh all
+      - name: Dump
+        if: failure()
+        run: proof/proof.sh dump
