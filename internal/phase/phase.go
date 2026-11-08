@@ -107,7 +107,11 @@ func Run(ctx context.Context, phases []Phase, from string, out io.Writer) error 
 		}
 		switch st.State {
 		case Done:
-			_, _ = fmt.Fprintf(out, "%s: done\n", p.Name())
+			if st.Reason != "" {
+				_, _ = fmt.Fprintf(out, "%s: done (%s)\n", p.Name(), st.Reason)
+			} else {
+				_, _ = fmt.Fprintf(out, "%s: done\n", p.Name())
+			}
 		case Blocked:
 			return &BlockedError{Phase: p.Name(), Reason: st.Reason}
 		case Manual:

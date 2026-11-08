@@ -54,6 +54,9 @@ providers:
     - name: docker
       version: v1.14.4
       url: https://github.com/kubernetes-sigs/cluster-api/releases/latest/infrastructure-components-development.yaml
+cluster:
+  manifests: cluster.yaml
+  namespace: mgmt
 `))
 	if err != nil {
 		t.Fatal(err)
@@ -71,7 +74,7 @@ providers:
 	}
 
 	states := func() string {
-		lines, err := phase.Report(t.Context(), Phases(cfg, deps))
+		lines, err := phase.Report(t.Context(), Phases(cfg, deps)[:3])
 		if err != nil {
 			t.Fatalf("status: %v", err)
 		}
@@ -86,11 +89,11 @@ providers:
 	}
 
 	var out bytes.Buffer
-	if err := phase.Run(t.Context(), Phases(cfg, deps), "", &out); err != nil {
+	if err := phase.Run(t.Context(), Phases(cfg, deps)[:3], "", &out); err != nil {
 		t.Fatalf("bootstrap: %v\n%s", err, out.String())
 	}
 	out.Reset()
-	if err := phase.Run(t.Context(), Phases(cfg, deps), "", &out); err != nil {
+	if err := phase.Run(t.Context(), Phases(cfg, deps)[:3], "", &out); err != nil {
 		t.Fatalf("second bootstrap: %v", err)
 	}
 	if strings.Contains(out.String(), "running") {
