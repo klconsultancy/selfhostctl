@@ -11,6 +11,7 @@ import (
 	"github.com/klconsultancy/selfhostctl/internal/k0scontainer"
 	"github.com/klconsultancy/selfhostctl/internal/kube"
 	"github.com/klconsultancy/selfhostctl/internal/phase"
+	"github.com/klconsultancy/selfhostctl/internal/providers"
 )
 
 // Image is the Bootstrap cluster's k0s, pinned per tool release like the CAPI core
@@ -37,6 +38,9 @@ type Deps struct {
 	NodesReady func(ctx context.Context, kubeconfig []byte) (bool, error)
 	// ReadyTimeout bounds the wait for a new Bootstrap cluster.
 	ReadyTimeout time.Duration
+	// Providers reads and installs the Cluster API providers;
+	// providers.Clusterctl outside tests.
+	Providers providers.Installer
 }
 
 // LiveNodesReady is Deps.NodesReady against a real cluster.
@@ -50,7 +54,10 @@ func LiveNodesReady(ctx context.Context, kubeconfig []byte) (bool, error) {
 
 // Phases are bootstrap's phases, in order.
 func Phases(cfg *config.ManagementCluster, deps Deps) []phase.Phase {
-	return []phase.Phase{newBootstrapClusterPhase(cfg, deps)}
+	return []phase.Phase{
+		newBootstrapClusterPhase(cfg, deps),
+		newProvidersPhase(cfg, deps),
+	}
 }
 
 // BootstrapCluster is the Bootstrap cluster of a Management cluster.

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/spf13/cobra"
@@ -19,6 +20,7 @@ import (
 	"github.com/klconsultancy/selfhostctl/internal/config"
 	"github.com/klconsultancy/selfhostctl/internal/dockerhost"
 	"github.com/klconsultancy/selfhostctl/internal/phase"
+	"github.com/klconsultancy/selfhostctl/internal/providers"
 )
 
 // version is set at release time with -ldflags "-X main.version=<tag>".
@@ -57,7 +59,13 @@ func liveApp() app {
 			if err != nil {
 				return nil, nil, err
 			}
-			deps := bootstrap.Deps{Docker: docker, NodesReady: bootstrap.LiveNodesReady}
+			deps := bootstrap.Deps{
+				Docker:     docker,
+				NodesReady: bootstrap.LiveNodesReady,
+				// The token only lifts clusterctl's GitHub rate limit; nothing else from
+				// the environment reaches clusterctl.
+				Providers: providers.Clusterctl{GitHubToken: os.Getenv("GITHUB_TOKEN"), WaitTimeout: 10 * time.Minute},
+			}
 			return bootstrap.Phases(cfg, deps), func() { _ = docker.Close() }, nil
 		},
 	}

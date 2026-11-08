@@ -24,7 +24,7 @@ Each release is built against exactly one Cluster API minor version.
 
 | selfhostctl | Cluster API |
 | ----------- | ----------- |
-| —           | —           |
+| unreleased (`main`) | v1.14 (core v1.14.4; the Bootstrap cluster on k0s v1.36.5) |
 
 No release has been published yet.
 

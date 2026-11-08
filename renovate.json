@@ -17,6 +17,14 @@
   },
   "customManagers": [
     {
+      "description": "The CAPI core the tool installs, in code; it moves with the sigs.k8s.io/cluster-api module (same group), which a test checks.",
+      "customType": "regex",
+      "managerFilePatterns": ["/^internal/support/support\\.go$/"],
+      "matchStrings": ["CAPIVersion = \"(?<currentValue>v[^\"]+)\""],
+      "depNameTemplate": "sigs.k8s.io/cluster-api",
+      "datasourceTemplate": "go"
+    },
+    {
       "description": "The Bootstrap cluster's k0s image, pinned in code per release (docs/adr/0001-core-libraries.md).",
       "customType": "regex",
       "managerFilePatterns": ["/^internal/bootstrap/bootstrap\\.go$/"],

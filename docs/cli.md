@@ -26,6 +26,7 @@ The config is described in [config.md](config.md). Terms such as Phase, Manual c
 | Phase | Done when |
 | --- | --- |
 | `bootstrap-cluster` | The Bootstrap cluster runs: the container `selfhostctl-<name>-bootstrap` (one k0s controller and worker, at the version this release pins) exists, and its node is Ready. Its API is published on localhost only. It mounts nothing from the host unless the config declares it. |
+| `providers` | The Bootstrap cluster runs exactly the declared providers, the core at this release's version, each installed with the declared variables. The tool records a fingerprint of the variables (never the values) on every Provider object as `selfhostctl.io/variables-fingerprint`. With some providers already installed, or other versions or variables, the phase is blocked and names the difference. The Bootstrap cluster holds nothing yet, so the fix is to delete its container and run again. |
 
 ## Exit codes
 

@@ -6,6 +6,7 @@ import (
 	"context"
 	"io"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 
 	"github.com/klconsultancy/selfhostctl/internal/config"
 	"github.com/klconsultancy/selfhostctl/internal/phase"
+	"github.com/klconsultancy/selfhostctl/internal/providers"
 )
 
 // fakeDocker keeps containers in memory. A started container has its admin.conf at
@@ -98,6 +100,10 @@ apiVersion: selfhostctl/v1alpha1
 kind: ManagementCluster
 metadata:
   name: mgmt
+providers:
+  bootstrap: [{name: k0sproject-k0smotron, version: v2.3.0}]
+  controlPlane: [{name: k0sproject-k0smotron, version: v2.3.0}]
+  infrastructure: [{name: docker, version: v1.14.4}]
 bootstrapCluster:
   network: kind
 `+mounts))
@@ -105,6 +111,26 @@ bootstrapCluster:
 		t.Fatal(err)
 	}
 	return c
+}
+
+// fakeInstaller keeps one cluster's providers in memory.
+type fakeInstaller struct {
+	installed []providers.Installed
+	inits     []providers.Wanted
+}
+
+func (f *fakeInstaller) Installed(context.Context, []byte) ([]providers.Installed, error) {
+	return f.installed, nil
+}
+
+func (f *fakeInstaller) Init(_ context.Context, _ []byte, w providers.Wanted) error {
+	f.inits = append(f.inits, w)
+	fp := providers.Fingerprint(w.Variables)
+	for _, p := range w.Providers {
+		p.URL = ""
+		f.installed = append(f.installed, providers.Installed{Provider: p, Fingerprint: fp})
+	}
+	return nil
 }
 
 func deps(d *fakeDocker, kubeconfigs *[]string) Deps {
@@ -115,6 +141,36 @@ func deps(d *fakeDocker, kubeconfigs *[]string) Deps {
 			return true, nil
 		},
 		ReadyTimeout: time.Second,
+		Providers:    &fakeInstaller{},
+	}
+}
+
+func TestProvidersPhase(t *testing.T) {
+	d := newFakeDocker()
+	var kubeconfigs []string
+	dp := deps(d, &kubeconfigs)
+	inst := dp.Providers.(*fakeInstaller)
+	cfg := testConfig(t, "")
+
+	st, err := Phases(cfg, dp)[1].Status(t.Context())
+	if err != nil || st.State != phase.Blocked || !strings.Contains(st.Reason, "Bootstrap cluster doesn't run") {
+		t.Fatalf("providers before the Bootstrap cluster: %v %v, want blocked on it", st, err)
+	}
+
+	if err := phase.Run(t.Context(), Phases(cfg, dp), "", io.Discard); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(inst.inits) != 1 {
+		t.Fatalf("clusterctl init ran %d times, want once", len(inst.inits))
+	}
+	if err := phase.Run(t.Context(), Phases(cfg, dp), "", io.Discard); err != nil || len(inst.inits) != 1 {
+		t.Errorf("second run: %v, init ran %d times", err, len(inst.inits))
+	}
+
+	inst.installed[1].Version = "v2.2.0"
+	st, err = Phases(cfg, dp)[1].Status(t.Context())
+	if err != nil || st.State != phase.Blocked || !strings.Contains(st.Reason, "bootstrap-k0sproject-k0smotron is at v2.2.0") {
+		t.Errorf("mismatched install: %v %v, want blocked with the difference", st, err)
 	}
 }
 

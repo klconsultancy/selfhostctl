@@ -27,7 +27,34 @@ type ManagementCluster struct {
 	APIVersion       string           `json:"apiVersion"`
 	Kind             string           `json:"kind"`
 	Metadata         Metadata         `json:"metadata"`
+	Providers        Providers        `json:"providers"`
 	BootstrapCluster BootstrapCluster `json:"bootstrapCluster"`
+}
+
+// Providers are the Cluster API providers besides the core, whose version follows from
+// the tool release. Versions stay plain scalars so external tools (Renovate, drift
+// alerts) can read them.
+type Providers struct {
+	Bootstrap      []Provider `json:"bootstrap"`
+	ControlPlane   []Provider `json:"controlPlane"`
+	Infrastructure []Provider `json:"infrastructure"`
+	IPAM           []Provider `json:"ipam,omitempty"`
+	Addon          []Provider `json:"addon,omitempty"`
+	// ClusterTopology turns on Cluster API's ClusterTopology feature gate where the
+	// core still needs it (CAPI < 1.15); from 1.15 it is on by default.
+	ClusterTopology bool `json:"clusterTopology,omitempty"`
+	// Variables are clusterctl variables for the providers' components, e.g. other
+	// feature gates. They are the only ones used: the operator's environment never
+	// reaches clusterctl.
+	Variables map[string]string `json:"variables,omitempty"`
+}
+
+type Provider struct {
+	// Name as clusterctl knows it, e.g. k0sproject-k0smotron.
+	Name    string `json:"name"`
+	Version string `json:"version"`
+	// URL of the components for a provider clusterctl doesn't know, or a fork.
+	URL string `json:"url,omitempty"`
 }
 
 type Metadata struct {
@@ -156,6 +183,7 @@ func (c *ManagementCluster) validate() []string {
 	if !dnsLabel.MatchString(c.Metadata.Name) || len(c.Metadata.Name) > 40 {
 		problems = append(problems, fmt.Sprintf("metadata.name: %q must be a lowercase DNS label of at most 40 characters", c.Metadata.Name))
 	}
+	problems = append(problems, c.Providers.validate()...)
 	for i, m := range c.BootstrapCluster.ExtraMounts {
 		at := fmt.Sprintf("bootstrapCluster.extraMounts[%d]", i)
 		if !path.IsAbs(m.HostPath) {
@@ -163,6 +191,53 @@ func (c *ManagementCluster) validate() []string {
 		}
 		if !path.IsAbs(m.ContainerPath) {
 			problems = append(problems, at+".containerPath: must be an absolute path")
+		}
+	}
+	return problems
+}
+
+var providerVersion = regexp.MustCompile(`^v\d+\.\d+\.\d+([-+][0-9A-Za-z.+-]+)?$`)
+
+func (p *Providers) validate() []string {
+	var problems []string
+	lists := []struct {
+		field    string
+		list     []Provider
+		required bool
+	}{
+		// clusterctl adds kubeadm's latest release for a bootstrap or control-plane
+		// type left empty, so those must be declared.
+		{"providers.bootstrap", p.Bootstrap, true},
+		{"providers.controlPlane", p.ControlPlane, true},
+		{"providers.infrastructure", p.Infrastructure, true},
+		{"providers.ipam", p.IPAM, false},
+		{"providers.addon", p.Addon, false},
+	}
+	for _, l := range lists {
+		if l.required && len(l.list) == 0 {
+			problems = append(problems, l.field+": at least one provider is required")
+		}
+		seen := map[string]bool{}
+		for i, pr := range l.list {
+			at := fmt.Sprintf("%s[%d]", l.field, i)
+			if !dnsLabel.MatchString(pr.Name) {
+				problems = append(problems, fmt.Sprintf("%s.name: %q is not a provider name", at, pr.Name))
+			}
+			if seen[pr.Name] {
+				problems = append(problems, fmt.Sprintf("%s.name: %q is declared twice", at, pr.Name))
+			}
+			seen[pr.Name] = true
+			if !providerVersion.MatchString(pr.Version) {
+				problems = append(problems, fmt.Sprintf("%s.version: %q is not a version like v1.2.3", at, pr.Version))
+			}
+			if pr.URL != "" && !strings.HasPrefix(pr.URL, "https://") {
+				problems = append(problems, at+".url: must be an https URL")
+			}
+		}
+	}
+	for k := range p.Variables {
+		if k == "CLUSTER_TOPOLOGY" {
+			problems = append(problems, "providers.variables: set CLUSTER_TOPOLOGY through providers.clusterTopology")
 		}
 	}
 	return problems
