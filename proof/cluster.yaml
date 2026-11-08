@@ -87,6 +87,11 @@ spec:
     args:
       - --enable-worker
       - --no-taints
+      # As the first user runs it: every node is a controller in the pod network, so the
+      # API servers reach pods directly. CAPD's load balancer forwards only 6443, so
+      # konnectivity agents could never reach their server through it anyway, and every
+      # webhook call failed with "No agent available" (the first proof run).
+      - --disable-components=konnectivity-server
     files:
       - path: /etc/k0s/encryption-config.yaml
         permissions: "0644"

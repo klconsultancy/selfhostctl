@@ -211,7 +211,8 @@ break_glass() {
     docker create --name "$BG" --hostname "$BG" --privileged --network kind \
       -p 127.0.0.1:$BG_PORT:6443 -v /var/lib/k0s \
       "docker.io/k0sproject/k0s:${K0S_VERSION/+/-}" \
-      k0s controller --config=/etc/k0s/k0s.yaml --enable-dynamic-config >/dev/null
+      k0s controller --config=/etc/k0s/k0s.yaml --enable-dynamic-config \
+      --disable-components=konnectivity-server >/dev/null
     local stage=$WORK/break-glass
     rm -rf "$stage" && mkdir -p "$stage/var/lib/k0s/pki" "$stage/etc/k0s"
     cp "$WORK"/pki/* "$stage/var/lib/k0s/pki/"
