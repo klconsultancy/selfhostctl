@@ -1,7 +1,7 @@
 //go:build integration
 
 // Package smoke proves that the libraries the tool is built on work together in one
-// module (#3, docs/adr/0001-core-libraries.md): the Docker SDK runs a Bootstrap
+// module (#3, docs/design.md#libraries): the Docker SDK runs a Bootstrap
 // cluster (one k0s container), the clusterctl library installs providers on it,
 // controller-runtime reads them back, and the Helm SDK installs a chart.
 //

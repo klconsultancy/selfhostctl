@@ -1,5 +1,5 @@
 // Package k0scontainer runs a k0s cluster in one Docker container through the Docker
-// SDK: the Bootstrap cluster, and later the Break-glass controller (docs/adr/0001).
+// SDK: the Bootstrap cluster, and later the Break-glass controller (docs/design.md#bootstrap-cluster).
 package k0scontainer
 
 import (

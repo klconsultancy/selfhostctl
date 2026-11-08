@@ -83,4 +83,4 @@ Declare a mount only when a provider needs it. In particular, the Docker socket 
 
 Provider versions are plain `name`/`version` scalars on purpose: Renovate, yq and drift alerts read them from this file.
 
-The Bootstrap cluster's k0s version is not configurable. Each tool release pins one, like its CAPI core version (docs/adr/0001-core-libraries.md).
+The Bootstrap cluster's k0s version is not configurable. Each tool release pins one, like its CAPI core version (docs/design.md#bootstrap-cluster).

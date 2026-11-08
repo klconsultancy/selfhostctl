@@ -54,7 +54,7 @@ jobs:
       - run: test "$(dist/selfhostctl_ci_linux_amd64 version)" = ci
 
   # Everything behind the integration tag, against the runner's Docker: the libraries
-  # smoke test (docs/adr/0001-core-libraries.md) and the phases against a real
+  # smoke test (docs/design.md#libraries) and the phases against a real
   # Bootstrap cluster.
   integration:
     runs-on: ubuntu-latest
