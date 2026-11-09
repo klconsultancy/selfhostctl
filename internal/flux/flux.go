@@ -293,7 +293,11 @@ func handled(ctx context.Context, c ctrlclient.Client, obj *unstructured.Unstruc
 		if ok {
 			return true, nil
 		}
-		if r, _ := condition(live, "Reconciling"); r["status"] == "True" {
+		// Only a settled verdict fails: Ready=False on the current generation, not while
+		// Flux is still reconciling. A source just created has no Ready condition yet.
+		cond, has := condition(live, "Ready")
+		gen, _, _ := unstructured.NestedInt64(live.Object, "status", "observedGeneration")
+		if r, _ := condition(live, "Reconciling"); r["status"] == "True" || !has || cond["status"] != "False" || gen != live.GetGeneration() {
 			return false, nil
 		}
 		return false, errors.New(why)

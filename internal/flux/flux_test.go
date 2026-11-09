@@ -204,7 +204,9 @@ func controller(ctx context.Context, c ctrlclient.Client, outcome func(kind stri
 			for i := range list.Items {
 				o := &list.Items[i]
 				at := o.GetAnnotations()[RequestedAtAnnotation]
-				if h, _, _ := unstructured.NestedString(o.Object, "status", "lastHandledReconcileAt"); at == "" || h == at {
+				// A handled request is settled once it has a Ready condition.
+				_, settled := condition(o, "Ready")
+				if h, _, _ := unstructured.NestedString(o.Object, "status", "lastHandledReconcileAt"); at == "" || (h == at && settled) {
 					continue
 				}
 				_ = unstructured.SetNestedField(o.Object, at, "status", "lastHandledReconcileAt")
@@ -232,6 +234,18 @@ func TestReconcile(t *testing.T) {
 			}
 			return ok(kind)
 		}, synced("main@sha1:abc"), true, "ssh: handshake failed"},
+		{"handled, but no Ready condition yet: wait, don't fail", func() func(string) map[string]any {
+			var mu sync.Mutex
+			n := map[string]int{}
+			return func(kind string) map[string]any {
+				mu.Lock()
+				defer mu.Unlock()
+				if n[kind]++; n[kind] == 1 {
+					return map[string]any{"type": "Reconciling", "status": "False"}
+				}
+				return ok(kind)
+			}
+		}(), synced("main@sha1:abc"), true, ""},
 		{"no Flux", ok, nil, false, "is Flux in the cluster's definition?"},
 		{"no controller handles the request", nil, synced("main@sha1:abc"), true, "didn't handle the reconcile request"},
 	}
