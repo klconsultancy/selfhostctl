@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/tools/clientcmd"
@@ -35,10 +36,13 @@ const (
 	// leaves it.
 	LocationSplit
 	LocationManagement
+	// LocationBreakGlass: the Break-glass controller holds the Cluster, during a
+	// Recovery (docs/design.md#recovery).
+	LocationBreakGlass
 )
 
 func (l Location) String() string {
-	return [...]string{"unknown", "none", "bootstrap", "split", "management"}[l]
+	return [...]string{"unknown", "none", "bootstrap", "split", "management", "break-glass"}[l]
 }
 
 // Situation is what locate found.
@@ -54,16 +58,32 @@ type Situation struct {
 	ManagementKC []byte
 	// SourcePaused, TargetPaused: the Cluster's spec.paused on each side.
 	SourcePaused, TargetPaused bool
-	// Unanswered: the kubeconfig file exists but its cluster doesn't answer. Not even
-	// --first overrides that.
-	Unanswered bool
+	// Unanswered: the kubeconfig file exists but its cluster doesn't answer, or refuses
+	// it (Refused). Not even --first overrides that.
+	Unanswered, Refused bool
+	// Down: the kubeconfig file's cluster doesn't answer at all, wherever the objects
+	// are.
+	Down bool
+	// BreakGlassExists: the Break-glass controller's container exists. BreakGlassKC is
+	// its kubeconfig while its API answers; BreakGlassHolds, BreakGlassPaused: it holds
+	// the Cluster, and whether that is paused.
+	BreakGlassExists                  bool
+	BreakGlassKC                      []byte
+	BreakGlassHolds, BreakGlassPaused bool
+	// WebhooksSaved: the Bootstrap cluster holds a Recovery's saved webhooks.
+	WebhooksSaved bool
 }
+
+// Recovering: a Recovery is in progress (docs/design.md#recovery).
+func (s Situation) Recovering() bool { return s.BreakGlassExists || s.WebhooksSaved }
 
 // locator computes the Situation once and keeps it until a phase has run.
 type locator struct {
 	cfg     *config.ManagementCluster
 	cluster *k0scontainer.Cluster
-	clients Clients
+	// breakGlass is the Break-glass controller's container; only its name counts here.
+	breakGlass *k0scontainer.Cluster
+	clients    Clients
 	// probe reports whether something accepts connections at host:port.
 	probe func(ctx context.Context, hostport string) bool
 	now   func() time.Time
@@ -137,6 +157,15 @@ func (l *locator) locate(ctx context.Context) (Situation, error) {
 		}
 	}
 
+	if s.BootstrapKC != nil {
+		s.WebhooksSaved = l.webhooksSaved(ctx, s.BootstrapKC)
+	}
+	if l.breakGlass != nil {
+		if err := l.locateBreakGlass(ctx, &s); err != nil {
+			return s, err
+		}
+	}
+
 	path, err := l.cfg.KubeconfigPath()
 	if err != nil {
 		return s, err
@@ -164,7 +193,13 @@ func (l *locator) locate(ctx context.Context) (Situation, error) {
 		}
 	}
 
+	s.Refused = refused != ""
+	s.Down = haveFile && !reachable && !s.Refused
 	switch {
+	case s.BreakGlassHolds && inBootstrap:
+		s.Location = LocationSplit
+	case s.BreakGlassHolds:
+		s.Location = LocationBreakGlass
 	case inBootstrap && inManagement:
 		s.Location = LocationSplit
 	case inManagement:
@@ -193,6 +228,45 @@ func (l *locator) locate(ctx context.Context) (Situation, error) {
 		s.Reason = fmt.Sprintf("no kubeconfig at %s, so nothing proves there is no Management cluster yet: copy it there, or run with --first if this is the cluster's first bootstrap", path)
 	}
 	return s, nil
+}
+
+// locateBreakGlass fills in the Break-glass controller's part of s.
+func (l *locator) locateBreakGlass(ctx context.Context, s *Situation) error {
+	o, err := l.breakGlass.Inspect(ctx)
+	if err != nil {
+		return err
+	}
+	s.BreakGlassExists = o.Exists
+	if !o.Running {
+		return nil
+	}
+	kc, err := l.breakGlass.Kubeconfig(ctx)
+	if errors.Is(err, k0scontainer.ErrNotReady) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	holds, paused, err := l.hold(ctx, kc)
+	if err != nil {
+		// Its API isn't up yet.
+		return nil
+	}
+	s.BreakGlassKC, s.BreakGlassHolds, s.BreakGlassPaused = kc, holds, paused
+	return nil
+}
+
+// webhooksSaved reports whether the Bootstrap cluster holds a Recovery's saved
+// webhooks; not while it can't tell.
+func (l *locator) webhooksSaved(ctx context.Context, kc []byte) bool {
+	c, err := l.clients(kc)
+	if err != nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	cm := &corev1.ConfigMap{}
+	return c.Get(ctx, ctrlclient.ObjectKey{Namespace: WebhooksNamespace, Name: WebhooksConfigMap}, cm) == nil
 }
 
 // credentialsRefused: the API answered, but not to these credentials.

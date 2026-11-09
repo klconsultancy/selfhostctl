@@ -21,7 +21,7 @@ import (
 	"github.com/klconsultancy/selfhostctl/internal/bootstrap"
 	"github.com/klconsultancy/selfhostctl/internal/config"
 	"github.com/klconsultancy/selfhostctl/internal/dockerhost"
-	"github.com/klconsultancy/selfhostctl/internal/flux"
+
 	"github.com/klconsultancy/selfhostctl/internal/phase"
 	"github.com/klconsultancy/selfhostctl/internal/providers"
 	"github.com/klconsultancy/selfhostctl/internal/recovery"
@@ -53,17 +53,19 @@ type app struct {
 	lookupEnv func(string) (string, bool)
 	// phases returns bootstrap's phases for a config; first is `--first`.
 	phases func(cfg *config.ManagementCluster, first bool) ([]phase.Phase, func(), error)
-	// locate says where the Management cluster's objects live, and why when unknown.
-	locate func(ctx context.Context, cfg *config.ManagementCluster) (string, string, error)
+	// locate says where the Management cluster's objects live, why when unknown, and
+	// whether a Recovery is in progress.
+	locate func(ctx context.Context, cfg *config.ManagementCluster) (location, why string, recovering bool, err error)
+	// recoverPhases returns recover's phases for a config.
+	recoverPhases func(cfg *config.ManagementCluster) ([]phase.Phase, func(), error)
 	// exportBundle reads the Recovery bundle from wherever the cluster's objects are.
 	exportBundle func(ctx context.Context, cfg *config.ManagementCluster) ([]byte, error)
 	// adopt stamps the Management cluster's providers with the config's fingerprint.
 	adopt func(ctx context.Context, cfg *config.ManagementCluster) error
 	// gitopsPhases is the gitops phase alone, for `gitops sync`.
 	gitopsPhases func(cfg *config.ManagementCluster) ([]phase.Phase, func(), error)
-	// suspended lists the Management cluster's suspended Flux objects; none before
-	// the pivot.
-	suspended func(ctx context.Context, cfg *config.ManagementCluster) ([]string, error)
+	// warnings are status's: suspended GitOps objects and paused Clusters.
+	warnings func(ctx context.Context, cfg *config.ManagementCluster) ([]string, error)
 }
 
 // liveDeps are bootstrap's dependencies on the real world.
@@ -95,14 +97,21 @@ func liveApp() app {
 			}
 			return bootstrap.Phases(cfg, deps), done, nil
 		},
-		locate: func(ctx context.Context, cfg *config.ManagementCluster) (string, string, error) {
+		locate: func(ctx context.Context, cfg *config.ManagementCluster) (string, string, bool, error) {
 			deps, done, err := liveDeps(cfg, false)
 			if err != nil {
-				return "", "", err
+				return "", "", false, err
 			}
 			defer done()
 			s, err := bootstrap.Locate(ctx, cfg, deps)
-			return s.Location.String(), s.Reason, err
+			return s.Location.String(), s.Reason, s.Recovering(), err
+		},
+		recoverPhases: func(cfg *config.ManagementCluster) ([]phase.Phase, func(), error) {
+			deps, done, err := liveDeps(cfg, false)
+			if err != nil {
+				return nil, nil, err
+			}
+			return bootstrap.RecoverPhases(cfg, deps), done, nil
 		},
 		exportBundle: func(ctx context.Context, cfg *config.ManagementCluster) ([]byte, error) {
 			deps, done, err := liveDeps(cfg, false)
@@ -154,26 +163,13 @@ func liveApp() app {
 			}
 			return bootstrap.GitOpsPhases(cfg, deps), done, nil
 		},
-		suspended: func(ctx context.Context, cfg *config.ManagementCluster) ([]string, error) {
+		warnings: func(ctx context.Context, cfg *config.ManagementCluster) ([]string, error) {
 			deps, done, err := liveDeps(cfg, false)
 			if err != nil {
 				return nil, err
 			}
 			defer done()
-			s, err := bootstrap.Locate(ctx, cfg, deps)
-			if err != nil || s.Location != bootstrap.LocationManagement || s.ManagementKC == nil {
-				return nil, err
-			}
-			c, err := bootstrap.LiveClients(s.ManagementKC)
-			if err != nil {
-				return nil, err
-			}
-			refs, err := flux.Suspended(ctx, c)
-			out := make([]string, len(refs))
-			for i, r := range refs {
-				out[i] = r.String()
-			}
-			return out, err
+			return bootstrap.Warnings(ctx, cfg, deps)
 		},
 	}
 }
@@ -323,6 +319,38 @@ func newRoot(a app, stdout io.Writer) *cobra.Command {
 	bootstrapCmd.Flags().BoolVar(&first, "first", false, "this is the cluster's first bootstrap: no Management cluster exists yet (only needed without its kubeconfig)")
 	root.AddCommand(bootstrapCmd)
 
+	var recoverFrom string
+	recoverCmd := &cobra.Command{
+		Use:   "recover",
+		Short: "Bring the Management cluster back from its surviving datastore once its machines are gone, phase by phase",
+		Long: "For when the Management cluster's API doesn't answer and its datastore survives. Reads the\n" +
+			"Recovery bundle, the kine data source and the encryption key from the variables recovery\n" +
+			"names: load them for this one command only, e.g. op run -- selfhostctl recover -f <config>.\n" +
+			"Runs a Break-glass controller against the datastore and moves the cluster's objects into a\n" +
+			"Bootstrap cluster. Run it again after any stop: it resumes from live state.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg, err := load()
+			if err != nil {
+				return classify(err)
+			}
+			if cfg.Recovery == nil {
+				return &exitError{exitUsage, errors.New("recover needs recovery in the config")}
+			}
+			if _, err := bootstrap.RecoverySecrets(cfg, a.lookupEnv); err != nil {
+				return &exitError{exitUsage, err}
+			}
+			phases, done, err := a.recoverPhases(cfg)
+			if err != nil {
+				return classify(err)
+			}
+			defer done()
+			return classify(phase.Run(cmd.Context(), phases, recoverFrom, stdout))
+		},
+	}
+	recoverCmd.Flags().StringVar(&recoverFrom, "from", "", "start at this phase, skipping the ones before it")
+	root.AddCommand(recoverCmd)
+
 	root.AddCommand(&cobra.Command{
 		Use:   "pivot",
 		Short: "bootstrap's phases from " + bootstrap.PivotFrom + ": the Management cluster takes over from the Bootstrap cluster",
@@ -436,24 +464,29 @@ func newRoot(a app, stdout io.Writer) *cobra.Command {
 			if err != nil {
 				return classify(err)
 			}
-			location, why, err := a.locate(cmd.Context(), cfg)
+			location, why, recovering, err := a.locate(cmd.Context(), cfg)
 			if err != nil {
 				return classify(err)
 			}
 			if why != "" {
 				location += " (" + why + ")"
 			}
-			_, _ = fmt.Fprintf(stdout, "location: %s\n", location)
-			if a.suspended != nil {
-				refs, err := a.suspended(cmd.Context(), cfg)
-				if err != nil {
-					return classify(err)
-				}
-				for _, r := range refs {
-					_, _ = fmt.Fprintf(stdout, "warning: %s is suspended\n", r)
-				}
+			if recovering {
+				location += ", a Recovery is in progress"
 			}
-			phases, done, err := a.phases(cfg, false)
+			_, _ = fmt.Fprintf(stdout, "location: %s\n", location)
+			warnings, err := a.warnings(cmd.Context(), cfg)
+			if err != nil {
+				return classify(err)
+			}
+			for _, w := range warnings {
+				_, _ = fmt.Fprintf(stdout, "warning: %s\n", w)
+			}
+			phasesOf := func(cfg *config.ManagementCluster) ([]phase.Phase, func(), error) { return a.phases(cfg, false) }
+			if recovering {
+				phasesOf = a.recoverPhases
+			}
+			phases, done, err := phasesOf(cfg)
 			if err != nil {
 				return classify(err)
 			}

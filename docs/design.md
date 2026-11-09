@@ -5,6 +5,8 @@ How selfhostctl is built, and why. Change it when the design moves. Requirements
 - [Libraries](#libraries)
 - [Bootstrap cluster](#bootstrap-cluster)
 - [Lifecycle state](#lifecycle-state)
+- [GitOps](#gitops)
+- [Recovery](#recovery)
 
 ## Libraries
 
@@ -117,3 +119,54 @@ Agreed 2026-11-09, for #10.
 | Already suspended by the operator | left alone, not marked | stays suspended |
 
 - `status` prints a warning for every suspended Kustomization and HelmRelease.
+
+## Recovery
+
+Agreed 2026-11-09, for #11 and #12. Profile `k0smotron-kine`.
+
+**State:** `locate` also looks at the Break-glass controller's container (`selfhostctl-<name>-break-glass`).
+
+| Location | Derived from |
+| --- | --- |
+| `break-glass` | the Break-glass controller holds the Cluster, the Bootstrap cluster doesn't |
+| `split` | both hold it: a move between them stopped halfway (also the pivot's case) |
+
+- **A Recovery is in progress** while the Break-glass controller's container exists or the Bootstrap cluster holds the saved webhooks. `bootstrap` and `pivot` are then blocked ("run `selfhostctl recover`"), and `status` lists `recover`'s phases.
+
+**`outage`, the first phase:**
+
+| Situation | `outage` |
+| --- | --- |
+| the kubeconfig's cluster doesn't answer (not: refuses its credentials) | done: the Recovery starts |
+| a Recovery is in progress | done |
+| anything else, e.g. the Management cluster answers | blocked: nothing to recover |
+
+**Phases (#11):** `outage`, `bootstrap-cluster`, `host`, `providers`, `before-apply`, `break-glass`, `leases`, `webhooks`, `suspend-gitops`, `pause-children`, `delete-nodes`, `move-to-bootstrap`, `delete-break-glass`. Every phase from `break-glass` to `delete-nodes` is done ("moved") once the Bootstrap cluster holds the objects.
+
+**Proof of the outage** (`leases`, before anything changes in the datastore). `outage` only sees that the API doesn't answer from here; a cut-off VPN or API proxy looks the same, and the steps after it would then change a live cluster.
+
+| | Choice |
+| --- | --- |
+| Evidence | the datastore itself: every live kube-apiserver renews its identity lease (`kube-system`, label `apiserver.kubernetes.io/identity`), every k0s controller and kubelet its lease in `kube-node-lease`, about every 10 s |
+| Gate | blocked while any lease but the Break-glass controller's own (by hostname, `k0s-ctrl-<container>`) was renewed within 2 minutes: "the datastore shows a live cluster" |
+| Clock | compared with the Break-glass controller's own renewal, not the operator's clock |
+| Cost | the Break-glass controller runs against the datastore before the proof; it writes only its own leases and registration there |
+| Not chosen | a confirmation flag per run (only the operator's belief); an infrastructure check (not generic; an Infrastructure adapter may add one, #13) |
+
+| Decision | Choice |
+| --- | --- |
+| Inputs | the Recovery bundle, the kine data source and the encryption key, from the variables `recovery` names. Checked by `recover` itself: missing → usage error |
+| `host` | Docker's memory (`Info`) at least 4 GiB; `fs.inotify.max_user_watches` ≥ 524288 and `max_user_instances` ≥ 512 (kind's known-issues values), read with a Docker exec in the Bootstrap cluster's container: the Docker API, no os/exec |
+| Break-glass version | `spec.version` of the Cluster's `K0sControlPlane` in `cluster.manifests`. Once its API answers: the live `K0sControlPlane`'s; a different one → the container is recreated at it |
+| Break-glass args | `controller --config … --enable-dynamic-config`, `--disable-components` from the manifest's `args` plus `konnectivity-server`. No worker. Other `args` are ignored |
+| Dynamic config | always on: k0smotron always passes it (v2.3.0). The local config is `api`, `storage` and the network CIDRs; the rest comes from the datastore |
+| Local config | `api.extraArgs` and `storage` from the manifest, with `storage.kine.dataSource` from the environment; `network.podCIDR`, `serviceCIDR`. Fixed: `externalAddress` = the bundle's endpoint host, SANs `127.0.0.1` and `localhost`, the API published on localhost only |
+| PKI | the bundle's CA, service-account key and front-proxy CA, written to `/var/lib/k0s/pki` before the container starts |
+| Encryption | at the path in `api.extraArgs.encryption-provider-config`: `aescbc` with key `key1`, then `identity`. The machines' config must use that format |
+| Saved webhooks | ConfigMap `kube-system/selfhostctl-recovery-webhooks` in the Bootstrap cluster, key `webhooks.json`: a `List` of the Validating and MutatingWebhookConfigurations labelled `cluster.x-k8s.io/provider`, without uid, resourceVersion and managedFields. Saved once, never re-read; gone with the Bootstrap cluster. Not in the cluster's namespace: `move` would carry it |
+| GitOps | through the seam (#gitops): suspended on the Break-glass controller. No `gitops` in the config: done |
+| Children | every `Cluster` outside the Management cluster's namespace: `spec.paused: true` and the marker `selfhostctl.io/paused`. One the operator paused is left alone and stays paused |
+| Nodes | every Node on the Break-glass controller is deleted: a new machine with a reused IP would match an old one |
+| Move | Break-glass controller → Bootstrap cluster, behind the pivot's gates; dry run first; a split resumes |
+| `status` | warns for every suspended GitOps object and every paused `Cluster`, read from the Break-glass controller while it runs, else from the Management cluster |
+

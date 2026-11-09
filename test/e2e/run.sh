@@ -8,7 +8,14 @@
 #      has passed (it stops at that checkpoint until then);
 #   4. bootstrap again runs nothing, even without the Recovery bundle;
 #   5. the Management cluster scales itself to two machines;
-#   6. without its kubeconfig, bootstrap refuses and creates no Bootstrap cluster.
+#   6. without its kubeconfig, bootstrap refuses and creates no Bootstrap cluster;
+#   7. recover refuses while the Management cluster answers;
+#   8. a Management cluster only cut off from here (its kubeconfig points nowhere):
+#      recover stops at the leases, the datastore's proof that it lives, and has
+#      changed nothing in it;
+#   9. every machine container removed (the datastore survives): recover runs a
+#      Break-glass controller against the datastore and moves the objects into a new
+#      Bootstrap cluster; again, it runs nothing, and bootstrap is blocked meanwhile.
 #
 # Flux comes from the cluster's own definition. Step 3's gitops phase gives it its
 # credential; Flux then syncs a ConfigMap from a git server in a container, and
@@ -30,6 +37,7 @@ CFG=$DIR/management.yaml
 KC=$WORK/mgmt.kubeconfig
 DB=selfhostctl-e2e-db
 BOOT=selfhostctl-mgmt-bootstrap
+BG=selfhostctl-mgmt-break-glass
 GIT=selfhostctl-e2e-git
 
 log() { printf '\n=== %s: %s\n' "$(date -u +%H:%M:%S)" "$*"; }
@@ -38,7 +46,7 @@ k() { kubectl --kubeconfig "$KC" --request-timeout=20s "$@"; }
 
 clean() {
   set +e
-  docker rm -f -v "$BOOT" "$DB" "$GIT" >/dev/null 2>&1
+  docker rm -f -v "$BOOT" "$BG" "$DB" "$GIT" >/dev/null 2>&1
   docker ps -aq --filter label=io.x-k8s.kind.cluster=mgmt | xargs -r docker rm -f -v >/dev/null 2>&1
   rm -rf "$WORK"
 }
@@ -51,6 +59,15 @@ expect() {
 }
 
 bootstrap_exists() { docker container inspect "$BOOT" >/dev/null 2>&1; }
+
+# The Management cluster's machine containers; CAPD's load balancer isn't one.
+machine_containers() {
+  docker ps -a --filter label=io.x-k8s.kind.cluster=mgmt --format '{{.Names}} {{.Label "io.x-k8s.kind.role"}}' \
+    | awk '$2 != "external-load-balancer" {print $1}'
+}
+
+# kb runs kubectl inside the Bootstrap cluster's container.
+kb() { docker exec "$BOOT" k0s kubectl "$@"; }
 
 # git_server: an SSH git server on the kind network with one repo, fleet.git, whose
 # clusters/mgmt holds a ConfigMap. Writes the client key to E2E_FLUX_DEPLOY_KEY and
@@ -180,6 +197,53 @@ run() {
   mv "$KC.away" "$KC"
   out=$("$BIN" recovery export -f "$CFG")
   grep -q '"kind": "RecoveryBundle"' <<<"$out" || die "recovery export from the Management cluster failed"
+  E2E_RECOVERY_BUNDLE=$out
+  export E2E_RECOVERY_BUNDLE
+
+  log "7. recover while the Management cluster answers: nothing to recover"
+  expect 3 "$BIN" recover -f "$CFG"
+  ! bootstrap_exists || die "recover created a Bootstrap cluster next to a healthy Management cluster"
+
+  log "8. only cut off from here: recover stops at the leases, having changed nothing"
+  cp "$KC" "$KC.real"
+  sed -i.bak 's#server: https://.*#server: https://127.0.0.1:9#' "$KC"
+  code=0
+  out=$("$BIN" recover -f "$CFG" 2>&1) || code=$?
+  echo "$out"
+  [[ $code == 3 ]] || die "recover against a live, cut-off cluster exited $code, want 3"
+  grep -q 'leases: blocked: the datastore shows a live cluster' <<<"$out" || die "recover didn't stop at the leases"
+  mv "$KC.real" "$KC"
+  k get validatingwebhookconfigurations -l cluster.x-k8s.io/provider -o name | grep -q . || die "the live cluster lost its webhooks"
+  [[ $(k get nodes -o name | wc -l) == 2 ]] || die "the live cluster lost Nodes"
+  docker rm -f -v "$BG" "$BOOT" >/dev/null
+
+  log "9. every machine removed: recover, through the Break-glass controller"
+  local c
+  for c in $(machine_containers); do docker rm -f -v "$c" >/dev/null; done
+  [[ -z $(machine_containers) ]] || die "machines left"
+  ! k get --raw /readyz >/dev/null 2>&1 || die "the Management cluster's API still answers"
+  # The machines' leases may still be fresh: leases blocks for up to 2 minutes.
+  for i in $(seq 8); do
+    code=0
+    out=$("$BIN" recover -f "$CFG" 2>&1) || code=$?
+    echo "$out"
+    [[ $code == 0 ]] && break
+    { [[ $code == 3 ]] && grep -q 'leases: blocked' <<<"$out"; } || die "recover exited $code"
+    ((i < 8)) || die "the machines' leases never went quiet"
+    sleep 30
+  done
+  ! docker container inspect "$BG" >/dev/null 2>&1 || die "the Break-glass controller is still there"
+  kb -n mgmt get cluster mgmt >/dev/null || die "the Cluster isn't in the Bootstrap cluster"
+  kb -n mgmt get k0scontrolplanes,machines
+  kb -n kube-system get configmap selfhostctl-recovery-webhooks -o jsonpath='{.data.webhooks\.json}' | grep -q WebhookConfiguration \
+    || die "the providers' webhooks weren't saved"
+  out=$("$BIN" recover -f "$CFG")
+  echo "$out"
+  ! grep -q running <<<"$out" || die "a second recover ran a phase"
+  out=$("$BIN" status -f "$CFG")
+  echo "$out"
+  grep -q '^location: bootstrap, a Recovery is in progress$' <<<"$out" || die "status doesn't show the Recovery"
+  expect 3 "$BIN" bootstrap -f "$CFG"
 
   log "E2E PASSED"
 }
@@ -188,6 +252,15 @@ dump() {
   set +e
   echo "--- containers"
   docker ps -a
+  if docker container inspect "$BG" >/dev/null 2>&1; then
+    echo "--- break-glass"
+    docker logs --tail 50 "$BG"
+  fi
+  if bootstrap_exists; then
+    echo "--- bootstrap cluster"
+    kb get clusters,k0scontrolplanes,machines -A
+    kb get pods -A -o wide | grep -v Running
+  fi
   [[ -s $KC ]] || return
   k get clusters,k0scontrolplanes,machines -A
   k get nodes -o wide

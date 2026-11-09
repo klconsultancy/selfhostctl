@@ -390,6 +390,21 @@ func Suspended(ctx context.Context, c ctrlclient.Client) ([]Ref, error) {
 	return refs, nil
 }
 
+// Unsuspended lists every Kustomization and HelmRelease Suspend would still suspend.
+func Unsuspended(ctx context.Context, c ctrlclient.Client) ([]Ref, error) {
+	objs, err := ordered(ctx, c, config.ObjectRef{})
+	if err != nil {
+		return nil, err
+	}
+	var refs []Ref
+	for _, o := range objs {
+		if !suspended(o) {
+			refs = append(refs, refOf(o))
+		}
+	}
+	return refs, nil
+}
+
 // ordered lists the root, the other Kustomizations, then the HelmReleases, each by
 // namespace and name. A missing CRD contributes nothing.
 func ordered(ctx context.Context, c ctrlclient.Client, root config.ObjectRef) ([]*unstructured.Unstructured, error) {

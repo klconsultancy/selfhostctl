@@ -32,6 +32,7 @@ import (
 const (
 	bootstrapKC   = "server: https://127.0.0.1:32001\n"
 	managementKC_ = "management\n"
+	breakGlassKC  = "server: https://127.0.0.1:32002\n"
 )
 
 func newFake(objs ...ctrlclient.Object) ctrlclient.Client {
@@ -50,6 +51,7 @@ type world struct {
 	docker      *fakeDocker
 	bootstrap   ctrlclient.Client // nil: holds nothing
 	management  ctrlclient.Client // nil: the kubeconfig doesn't reach it
+	breakGlass  ctrlclient.Client // nil: its API doesn't answer
 	kubeconfig  string            // the kubeconfig file's path; "" for none
 	installed   map[string][]providers.Installed
 	moves       []string
@@ -74,6 +76,11 @@ func (w *world) clients(kc []byte) (ctrlclient.Client, error) {
 			return nil, errors.New("connection refused")
 		}
 		return w.management, nil
+	case breakGlassKC:
+		if w.breakGlass == nil {
+			return nil, errors.New("connection refused")
+		}
+		return w.breakGlass, nil
 	}
 	return nil, errors.New("unknown cluster")
 }
@@ -192,6 +199,21 @@ func TestLocate(t *testing.T) {
 		{"pivoted", func(t *testing.T) *world {
 			return &world{docker: newFakeDocker(), kubeconfig: kubeconfigFile(t), management: newFake(theCluster(false))}
 		}, LocationManagement},
+		{"on the Break-glass controller", func(t *testing.T) *world {
+			w := &world{docker: running(t), kubeconfig: kubeconfigFile(t), breakGlass: newFake(theCluster(false))}
+			w.docker.containers["selfhostctl-mgmt-break-glass"] = &fakeContainer{running: true}
+			return w
+		}, LocationBreakGlass},
+		{"on the Break-glass controller and in the Bootstrap cluster", func(t *testing.T) *world {
+			w := &world{docker: running(t), kubeconfig: kubeconfigFile(t), breakGlass: newFake(theCluster(true)), bootstrap: newFake(theCluster(true))}
+			w.docker.containers["selfhostctl-mgmt-break-glass"] = &fakeContainer{running: true}
+			return w
+		}, LocationSplit},
+		{"a Break-glass controller whose API doesn't answer yet", func(t *testing.T) *world {
+			w := &world{docker: running(t), kubeconfig: kubeconfigFile(t)}
+			w.docker.containers["selfhostctl-mgmt-break-glass"] = &fakeContainer{running: true}
+			return w
+		}, LocationUnknown},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

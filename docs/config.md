@@ -71,7 +71,7 @@ Relative paths are relative to the config file.
 | `cluster.kubeconfig` | no | Where bootstrap writes the admin kubeconfig (mode 0600); `~/.kube/<metadata.name>.kubeconfig` when empty. |
 | `recovery.profile` | with `recovery` | How the Management cluster is recovered: `k0smotron-kine`, the one profile so far. Without `recovery`, bootstrap doesn't ask for a Recovery bundle. |
 | `recovery.bundleFromEnv` | with `recovery` | The environment variable holding the Recovery bundle (`selfhostctl recovery export`). Bootstrap's `recovery-bundle` checkpoint doesn't let a bootstrap finish without it. |
-| `recovery.encryptionKeyFromEnv` | with `recovery` | The variable holding the key the cluster's Secrets are encrypted with at rest. Use the same variable in the `beforeApply` file that gives the machines their encryption config. |
+| `recovery.encryptionKeyFromEnv` | with `recovery` | The variable holding the key the cluster's Secrets are encrypted with at rest. Use the same variable in the `beforeApply` file that gives the machines their encryption config, as `aescbc` with key name `key1`, then `identity`: the Break-glass controller builds that config from the key. |
 | `recovery.kine.datasourceFromEnv` | with `k0smotron-kine` | The variable holding kine's data source, e.g. `postgres://user:password@host:5432/db`. |
 
 None of the `recovery` variables has to be set to start a bootstrap: the checkpoint asks for them once the cluster exists.
