@@ -5,6 +5,7 @@ selfhostctl bootstrap       -f management.yaml [--from <phase>] [--first]
 selfhostctl pivot           -f management.yaml
 selfhostctl status          -f management.yaml
 selfhostctl providers adopt -f management.yaml
+selfhostctl gitops sync     -f management.yaml
 selfhostctl kubeconfig renew -f management.yaml   # with the Recovery bundle, e.g. via op run
 selfhostctl recovery export -f management.yaml > into-your-secret-store
 selfhostctl version
@@ -41,7 +42,9 @@ The config is described in [config.md](config.md). Terms such as Phase, Manual c
 
 `kubeconfig renew` writes a new admin kubeconfig signed with the Recovery bundle's CA, valid 30 days, for when the file has expired or is lost. Load the bundle for that one command only: `op run -- selfhostctl kubeconfig renew -f management.yaml`.
 
-`pivot` runs bootstrap's phases from `management-providers`. `providers adopt` stamps a Management cluster's providers, installed some other way, with the config's variables fingerprint, after checking their versions. Run it only if they run with exactly `providers.variables`.
+`pivot` runs bootstrap's phases from `management-providers`.
+
+`gitops sync` runs the `gitops` phase alone against the live Management cluster, e.g. after a new deploy key or a moved root Kustomization. Done already: nothing is written. `status` prints a warning for every suspended Flux Kustomization and HelmRelease. `providers adopt` stamps a Management cluster's providers, installed some other way, with the config's variables fingerprint, after checking their versions. Run it only if they run with exactly `providers.variables`.
 
 `bootstrap` has these Phases:
 
@@ -58,6 +61,7 @@ The config is described in [config.md](config.md). Terms such as Phase, Manual c
 | `management-before-apply` | The `beforeApply` entries for `management` are in place on the Management cluster. |
 | `move` | The Cluster's namespace is on the Management cluster, unpaused. **Gates:** the providers match on both sides (versions and fingerprints; an unstamped side is **manual**, `providers adopt`), and the namespace holds no other Cluster. Running does a dry run, then the move. A move that stopped halfway (`split`) resumes, and a move that ended before unpausing is unpaused. |
 | `after-pivot` | The `afterPivot` entries are in place on the Management cluster. |
+| `gitops` | With `gitops`: the credential Secret holds the key from `gitops.flux.credentialSecret.fromEnv` and the `knownHosts` file, every FluxInstance is Ready, the root Kustomization's source is Ready, and the root applied its revision. Running it writes the Secret when it differs (never with an empty field), then has Flux fetch and apply now, and waits: a fresh fetch, not the last good artifact. A failing fetch fails with Flux's message. Without Flux's CRDs in time it is **blocked**: "is Flux in the cluster's definition?". Without `gitops`: done. |
 | `delete-bootstrap-cluster` | No Bootstrap cluster exists. Before it is deleted, the Management cluster must be `Available` with `RemoteConnectionProbe`, have every Machine `NodeHealthy`, and have had no change (condition or new Machine) for `bootstrapCluster.deleteAfterStable`. Until then it is **manual**: "stable for X of Y, run again then". |
 
 ## Exit codes

@@ -45,6 +45,9 @@ type ManagementCluster struct {
 	// Recovery is how the Management cluster is recovered when its machines are gone.
 	// Without it, bootstrap doesn't ask for a Recovery bundle.
 	Recovery *Recovery `json:"recovery,omitempty"`
+	// GitOps is how the Management cluster's GitOps controller gets its credential.
+	// Without it, bootstrap ends without touching GitOps.
+	GitOps *GitOps `json:"gitops,omitempty"`
 
 	// dir is the config file's directory; relative paths in the config are relative to
 	// it.
@@ -63,6 +66,45 @@ type Cluster struct {
 	// Kubeconfig is where bootstrap writes the Management cluster's admin kubeconfig;
 	// ~/.kube/<metadata.name>.kubeconfig when empty.
 	Kubeconfig string `json:"kubeconfig,omitempty"`
+}
+
+// GitOps names the GitOps controller. Flux is the one there is.
+type GitOps struct {
+	Flux *Flux `json:"flux"`
+}
+
+// Flux comes from the cluster's own definition; the tool only gives it its git
+// credential and checks that it syncs.
+type Flux struct {
+	CredentialSecret CredentialSecret `json:"credentialSecret"`
+	// Root is the Kustomization that syncs everything else, flux-operator's
+	// flux-system/flux-system when empty.
+	Root *ObjectRef `json:"root,omitempty"`
+}
+
+// CredentialSecret is the Secret Flux's source reads: identity from the environment,
+// known_hosts from a file.
+type CredentialSecret struct {
+	Name      string `json:"name"`
+	Namespace string `json:"namespace"`
+	// FromEnv is the variable holding the SSH private key (identity).
+	FromEnv string `json:"fromEnv" selfhostctl:"env"`
+	// KnownHosts is a file with the git server's host keys, in known_hosts format.
+	KnownHosts string `json:"knownHosts"`
+}
+
+// ObjectRef names a namespaced object.
+type ObjectRef struct {
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+}
+
+// FluxRoot is the root Kustomization, with its default.
+func (f *Flux) FluxRoot() ObjectRef {
+	if f.Root != nil {
+		return *f.Root
+	}
+	return ObjectRef{Namespace: "flux-system", Name: "flux-system"}
 }
 
 // ProfileK0smotronKine is the one recovery profile the tool has.
@@ -263,6 +305,11 @@ func (c *ManagementCluster) checkFiles() []string {
 	if _, err := os.Stat(c.Path(c.Cluster.Manifests)); err != nil {
 		problems = append(problems, fmt.Sprintf("cluster.manifests: %v", err))
 	}
+	if g := c.GitOps; g != nil && g.Flux != nil {
+		if _, err := os.Stat(c.Path(g.Flux.CredentialSecret.KnownHosts)); err != nil {
+			problems = append(problems, fmt.Sprintf("gitops.flux.credentialSecret.knownHosts: %v", err))
+		}
+	}
 	entries := map[string]Prerequisite{}
 	for i, p := range c.BeforeApply {
 		entries[fmt.Sprintf("beforeApply[%d]", i)] = p
@@ -422,6 +469,7 @@ func (c *ManagementCluster) validate() []string {
 			}
 		}
 	}
+	problems = append(problems, c.GitOps.validate()...)
 	for i, p := range c.BeforeApply {
 		problems = append(problems, p.validate(fmt.Sprintf("beforeApply[%d]", i))...)
 	}
@@ -483,6 +531,41 @@ func (p Prerequisite) validate(at string) []string {
 	}
 	return problems
 }
+
+func (g *GitOps) validate() []string {
+	if g == nil {
+		return nil
+	}
+	if g.Flux == nil {
+		return []string{"gitops.flux: required with gitops: flux is the one GitOps tool selfhostctl has"}
+	}
+	var problems []string
+	s := g.Flux.CredentialSecret
+	if !dnsSubdomain.MatchString(s.Name) {
+		problems = append(problems, fmt.Sprintf("gitops.flux.credentialSecret.name: %q must be a lowercase DNS name", s.Name))
+	}
+	if !dnsLabel.MatchString(s.Namespace) {
+		problems = append(problems, fmt.Sprintf("gitops.flux.credentialSecret.namespace: %q must be a lowercase DNS label", s.Namespace))
+	}
+	if !envName.MatchString(s.FromEnv) {
+		problems = append(problems, fmt.Sprintf("gitops.flux.credentialSecret.fromEnv: %q is not an environment variable name", s.FromEnv))
+	}
+	if s.KnownHosts == "" {
+		problems = append(problems, "gitops.flux.credentialSecret.knownHosts: required: the git server's host keys")
+	}
+	if r := g.Flux.Root; r != nil {
+		if !dnsLabel.MatchString(r.Namespace) {
+			problems = append(problems, fmt.Sprintf("gitops.flux.root.namespace: %q must be a lowercase DNS label", r.Namespace))
+		}
+		if !dnsSubdomain.MatchString(r.Name) {
+			problems = append(problems, fmt.Sprintf("gitops.flux.root.name: %q must be a lowercase DNS name", r.Name))
+		}
+	}
+	return problems
+}
+
+// A DNS-1123 subdomain: most Kubernetes object names.
+var dnsSubdomain = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`)
 
 var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 

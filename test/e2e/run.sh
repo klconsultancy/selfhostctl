@@ -10,9 +10,14 @@
 #   5. the Management cluster scales itself to two machines;
 #   6. without its kubeconfig, bootstrap refuses and creates no Bootstrap cluster.
 #
+# Flux comes from the cluster's own definition. Step 3's gitops phase gives it its
+# credential; Flux then syncs a ConfigMap from a git server in a container, and
+# `gitops sync` again writes nothing.
+#
 # Needs Docker, kubectl, and a host that reaches CAPD's load balancer (Linux; on macOS,
-# run it inside the Docker VM). The PostgreSQL container for kine is test
-# infrastructure, started here with the docker CLI. SELFHOSTCTL_BIN skips the build.
+# run it inside the Docker VM), ssh-keygen and git. The PostgreSQL container for kine and
+# the git server are test infrastructure, started here with the docker CLI.
+# SELFHOSTCTL_BIN skips the build.
 #
 # usage: test/e2e/run.sh [run|clean]
 set -euo pipefail
@@ -25,6 +30,7 @@ CFG=$DIR/management.yaml
 KC=$WORK/mgmt.kubeconfig
 DB=selfhostctl-e2e-db
 BOOT=selfhostctl-mgmt-bootstrap
+GIT=selfhostctl-e2e-git
 
 log() { printf '\n=== %s: %s\n' "$(date -u +%H:%M:%S)" "$*"; }
 die() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
@@ -32,7 +38,7 @@ k() { kubectl --kubeconfig "$KC" --request-timeout=20s "$@"; }
 
 clean() {
   set +e
-  docker rm -f -v "$BOOT" "$DB" >/dev/null 2>&1
+  docker rm -f -v "$BOOT" "$DB" "$GIT" >/dev/null 2>&1
   docker ps -aq --filter label=io.x-k8s.kind.cluster=mgmt | xargs -r docker rm -f -v >/dev/null 2>&1
   rm -rf "$WORK"
 }
@@ -45,6 +51,55 @@ expect() {
 }
 
 bootstrap_exists() { docker container inspect "$BOOT" >/dev/null 2>&1; }
+
+# git_server: an SSH git server on the kind network with one repo, fleet.git, whose
+# clusters/mgmt holds a ConfigMap. Writes the client key to E2E_FLUX_DEPLOY_KEY and
+# the host key to .work/known_hosts.
+git_server() {
+  local keys=$WORK/git-keys repo=$WORK/fleet
+  mkdir -p "$keys"
+  ssh-keygen -q -t ed25519 -N '' -C e2e-host -f "$keys/ssh_host_ed25519_key"
+  ssh-keygen -q -t ed25519 -N '' -C e2e-flux -f "$keys/flux"
+  cp "$keys/flux.pub" "$keys/authorized_keys"
+  printf '%s %s\n' "$GIT" "$(cut -d' ' -f1-2 "$keys/ssh_host_ed25519_key.pub")" >"$WORK/known_hosts"
+  E2E_FLUX_DEPLOY_KEY=$(cat "$keys/flux")
+  export E2E_FLUX_DEPLOY_KEY
+
+  mkdir -p "$repo/clusters/mgmt"
+  cat >"$repo/clusters/mgmt/kustomization.yaml" <<'YAML'
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources: [configmap.yaml]
+YAML
+  cat >"$repo/clusters/mgmt/configmap.yaml" <<'YAML'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: e2e-flux-synced
+  namespace: default
+data:
+  from: fleet.git
+YAML
+  git -C "$repo" init -q -b main
+  git -C "$repo" add .
+  git -C "$repo" -c user.name=e2e -c user.email=e2e@example.invalid commit -q -m fleet
+  git clone -q --bare "$repo" "$WORK/fleet.git"
+
+  docker create --name "$GIT" --network kind alpine:3.22 sh -c '
+    set -e
+    apk add --no-cache -q git openssh-server
+    adduser -D -s /usr/bin/git-shell git
+    sed -i "s/^git:!/git:*/" /etc/shadow
+    install -d -o git -m 700 /home/git/.ssh
+    install -o git -m 600 /keys/authorized_keys /home/git/.ssh/authorized_keys
+    install -m 600 /keys/ssh_host_ed25519_key /etc/ssh/ssh_host_ed25519_key
+    chown -R git /srv/fleet.git
+    exec /usr/sbin/sshd -D -e -o HostKey=/etc/ssh/ssh_host_ed25519_key -o PasswordAuthentication=no
+  ' >/dev/null
+  docker cp "$keys" "$GIT:/keys"
+  docker cp "$WORK/fleet.git" "$GIT:/srv/fleet.git"
+  docker start "$GIT" >/dev/null
+}
 
 run() {
   mkdir -p "$WORK"
@@ -63,6 +118,9 @@ run() {
   docker run -d --name "$DB" --network kind -e POSTGRES_USER=kine -e POSTGRES_PASSWORD=kine-e2e \
     -e POSTGRES_DB=kine postgres:17.6 >/dev/null
   until docker exec "$DB" pg_isready -U kine >/dev/null 2>&1; do sleep 2; done
+
+  log "a git server for Flux"
+  git_server
 
   log "1. no kubeconfig, no --first: fail closed"
   expect 3 "$BIN" bootstrap -f "$CFG"
@@ -86,6 +144,10 @@ run() {
   done
   ! bootstrap_exists || die "the Bootstrap cluster is still there"
   k get nodes -o wide
+  k -n default get configmap e2e-flux-synced >/dev/null || die "Flux didn't sync the fleet repo"
+  out=$("$BIN" gitops sync -f "$CFG")
+  echo "$out"
+  ! grep -q running <<<"$out" || die "gitops sync wrote something on a synced cluster"
 
   log "4. bootstrap again, without the Recovery bundle: nothing runs"
   unset E2E_RECOVERY_BUNDLE
@@ -98,6 +160,7 @@ run() {
   out=$("$BIN" status -f "$CFG")
   echo "$out"
   grep -q '^location: management$' <<<"$out" || die "status doesn't say management"
+  ! grep -q '^warning: .* is suspended' <<<"$out" || die "status reports a suspended Flux object"
 
   log "5. the Management cluster manages itself: two machines"
   k -n mgmt patch k0scontrolplane mgmt --type=merge -p '{"spec":{"replicas":2}}'
@@ -129,7 +192,9 @@ dump() {
   k get clusters,k0scontrolplanes,machines -A
   k get nodes -o wide
   k get pods -A -o wide | grep -v Running
+  k get fluxinstances,gitrepositories,kustomizations -A
   k get events -A --field-selector type=Warning | tail -30
+  docker logs --tail 30 "$GIT"
 }
 
 case ${1:-run} in

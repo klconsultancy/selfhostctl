@@ -28,3 +28,12 @@ recovery:
   bundleFromEnv: E2E_RECOVERY_BUNDLE
   encryptionKeyFromEnv: E2E_ENCRYPTION_KEY
   kine: {datasourceFromEnv: E2E_KINE_DATASOURCE}
+# Flux comes from the cluster's definition (cluster/cluster.yaml, k0s Helm extensions);
+# the git server is a container run.sh starts, with keys it generates.
+gitops:
+  flux:
+    credentialSecret:
+      name: flux-git
+      namespace: flux-system
+      fromEnv: E2E_FLUX_DEPLOY_KEY
+      knownHosts: .work/known_hosts

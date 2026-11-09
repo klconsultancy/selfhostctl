@@ -79,6 +79,16 @@ func TestParseRejects(t *testing.T) {
 			want: []string{"set CLUSTER_TOPOLOGY through providers.clusterTopology"},
 		},
 		{
+			name: "gitops without flux",
+			yaml: valid + "gitops: {}\n",
+			want: []string{"gitops.flux: required"},
+		},
+		{
+			name: "bad gitops fields",
+			yaml: valid + "gitops:\n  flux:\n    credentialSecret: {name: Flux_Git, namespace: flux-system, fromEnv: 'not a var'}\n    root: {namespace: '', name: x}\n",
+			want: []string{`credentialSecret.name: "Flux_Git"`, `credentialSecret.fromEnv: "not a var"`, "credentialSecret.knownHosts: required", `root.namespace: ""`},
+		},
+		{
 			name: "relative mount paths",
 			yaml: strings.NewReplacer("hostPath: /var/run/docker.sock", "hostPath: docker.sock", "containerPath: /var/run/docker.sock", "containerPath: sock").Replace(valid),
 			want: []string{"extraMounts[0].hostPath: must be an absolute path", "extraMounts[0].containerPath: must be an absolute path"},
@@ -97,6 +107,21 @@ func TestParseRejects(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestGitOps(t *testing.T) {
+	c, err := Parse("management.yaml", []byte(valid+"gitops:\n  flux:\n    credentialSecret: {name: flux-git, namespace: flux-system, fromEnv: FLUX_KEY, knownHosts: known_hosts}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.GitOps.Flux.FluxRoot(); got != (ObjectRef{"flux-system", "flux-system"}) {
+		t.Errorf("default root: %v", got)
+	}
+	// The key is required before anything runs.
+	var me *MissingEnvError
+	if err := c.CheckEnv(func(string) (string, bool) { return "", true }); !errors.As(err, &me) || !reflect.DeepEqual(me.Names, []string{"FLUX_KEY"}) {
+		t.Errorf("CheckEnv: %v, want FLUX_KEY missing", err)
 	}
 }
 

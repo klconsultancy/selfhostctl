@@ -21,6 +21,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/klconsultancy/selfhostctl/internal/config"
+	"github.com/klconsultancy/selfhostctl/internal/flux"
 	"github.com/klconsultancy/selfhostctl/internal/phase"
 	"github.com/klconsultancy/selfhostctl/internal/providers"
 	"github.com/klconsultancy/selfhostctl/internal/recovery"
@@ -37,7 +38,8 @@ func newFake(objs ...ctrlclient.Object) ctrlclient.Client {
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
 	mapper := meta.NewDefaultRESTMapper([]schema.GroupVersion{clusterGVK.GroupVersion(), k0sControlPlaneGVK.GroupVersion()})
-	for _, gvk := range []schema.GroupVersionKind{clusterGVK, k0sControlPlaneGVK, {Group: "cluster.x-k8s.io", Version: "v1beta2", Kind: "Machine"}} {
+	for _, gvk := range []schema.GroupVersionKind{clusterGVK, k0sControlPlaneGVK, {Group: "cluster.x-k8s.io", Version: "v1beta2", Kind: "Machine"},
+		flux.KustomizationGVK, flux.HelmReleaseGVK, flux.FluxInstanceGVK, gitRepositoryGVK} {
 		mapper.Add(gvk, meta.RESTScopeNamespace)
 	}
 	return fake.NewClientBuilder().WithScheme(scheme).WithRESTMapper(mapper).WithObjects(objs...).Build()
@@ -52,7 +54,9 @@ type world struct {
 	installed   map[string][]providers.Installed
 	moves       []string
 	probeAnswer bool
-	refuse      bool // the Management cluster answers Unauthorized
+	refuse      bool              // the Management cluster answers Unauthorized
+	extraYAML   string            // appended to the config
+	env         map[string]string // the operator's environment
 }
 
 func (w *world) clients(kc []byte) (ctrlclient.Client, error) {
@@ -97,9 +101,9 @@ func theCluster(paused bool, conds ...string) *unstructured.Unstructured {
 	return u
 }
 
-func pivotConfig(t *testing.T, kubeconfig string) *config.ManagementCluster {
+func pivotConfig(t *testing.T, kubeconfig string, extra ...string) *config.ManagementCluster {
 	t.Helper()
-	cfg, err := config.Parse("t.yaml", []byte(strings.Replace(testYAML, "/nonexistent/selfhostctl-test/mgmt.kubeconfig", kubeconfig, 1)))
+	cfg, err := config.Parse("t.yaml", []byte(strings.Replace(testYAML, "/nonexistent/selfhostctl-test/mgmt.kubeconfig", kubeconfig, 1)+strings.Join(extra, "")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,16 +121,18 @@ func (w *world) phases(t *testing.T, first bool) []phase.Phase {
 	if w.installed == nil {
 		w.installed = map[string][]providers.Installed{bootstrapKC: stamped, managementKC_: installedFor(wanted)}
 	}
-	return Phases(pivotConfig(t, path), Deps{
-		Docker:     w.docker,
-		NodesReady: func(context.Context, []byte) (bool, error) { return true, nil },
-		Providers:  fakeSides{w},
-		Mover:      fakeMover{w},
-		Clients:    w.clients,
-		Lookup:     func(string) (string, bool) { return "", false },
-		First:      first,
-		Probe:      func(context.Context, string) bool { return w.probeAnswer },
-		Now:        time.Now,
+	return Phases(pivotConfig(t, path, w.extraYAML), Deps{
+		Docker:        w.docker,
+		NodesReady:    func(context.Context, []byte) (bool, error) { return true, nil },
+		Providers:     fakeSides{w},
+		Mover:         fakeMover{w},
+		Clients:       w.clients,
+		Lookup:        func(k string) (string, bool) { v, ok := w.env[k]; return v, ok },
+		First:         first,
+		Probe:         func(context.Context, string) bool { return w.probeAnswer },
+		Now:           time.Now,
+		GitOpsTimeout: 2 * time.Second,
+		GitOpsPoll:    5 * time.Millisecond,
 	})
 }
 

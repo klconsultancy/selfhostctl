@@ -59,6 +59,9 @@ type Deps struct {
 	Probe func(ctx context.Context, hostport string) bool
 	// Now is time.Now outside tests.
 	Now func() time.Time
+	// GitOpsTimeout bounds each of the gitops phase's waits; GitOpsPoll is how often it
+	// looks.
+	GitOpsTimeout, GitOpsPoll time.Duration
 }
 
 func (d *Deps) defaults() {
@@ -76,6 +79,12 @@ func (d *Deps) defaults() {
 	}
 	if d.Now == nil {
 		d.Now = time.Now
+	}
+	if d.GitOpsTimeout == 0 {
+		d.GitOpsTimeout = 10 * time.Minute
+	}
+	if d.GitOpsPoll == 0 {
+		d.GitOpsPoll = 5 * time.Second
 	}
 }
 
@@ -121,6 +130,17 @@ func Phases(cfg *config.ManagementCluster, deps Deps) []phase.Phase {
 		}
 	}
 	afterPivot := onManagement("move")
+	// managing is the Management cluster's kubeconfig once it manages itself.
+	managing := func(ctx context.Context) ([]byte, *phase.Status, error) {
+		s, err := loc.get(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		if s.Location != LocationManagement || s.TargetPaused {
+			return nil, &phase.Status{State: phase.Blocked, Reason: "the Management cluster doesn't manage itself yet (phase move)"}, nil
+		}
+		return afterPivot(ctx)
+	}
 	wanted := providers.FromConfig(&cfg.Providers)
 
 	phases := []phase.Phase{
@@ -145,22 +165,25 @@ func Phases(cfg *config.ManagementCluster, deps Deps) []phase.Phase {
 		&managementProvidersPhase{loc: loc, wanted: wanted, installer: deps.Providers},
 		&prerequisitesPhase{name: "management-before-apply", entries: forManagement, prereqs: deps.Prerequisites, kc: onManagement("kubeconfig")},
 		&movePhase{cfg: cfg, loc: loc, installer: deps.Providers, mover: deps.Mover, clients: deps.Clients},
-		&prerequisitesPhase{name: "after-pivot", entries: cfg.AfterPivot, prereqs: deps.Prerequisites, kc: func(ctx context.Context) ([]byte, *phase.Status, error) {
-			s, err := loc.get(ctx)
-			if err != nil {
-				return nil, nil, err
-			}
-			if s.Location != LocationManagement || s.TargetPaused {
-				return nil, &phase.Status{State: phase.Blocked, Reason: "the Management cluster doesn't manage itself yet (phase move)"}, nil
-			}
-			return afterPivot(ctx)
-		}},
+		&prerequisitesPhase{name: "after-pivot", entries: cfg.AfterPivot, prereqs: deps.Prerequisites, kc: managing},
+		&gitopsPhase{cfg: cfg, kc: managing, clients: deps.Clients, lookup: deps.Lookup, now: deps.Now, timeout: deps.GitOpsTimeout, poll: deps.GitOpsPoll},
 		&deleteBootstrapPhase{cfg: cfg, loc: loc, cluster: cluster, clients: deps.Clients, now: deps.Now},
 	}
 	for i, p := range phases {
 		phases[i] = tracked{p, loc}
 	}
 	return phases
+}
+
+// GitOpsPhases is the gitops phase alone, for `gitops sync` against the live
+// Management cluster.
+func GitOpsPhases(cfg *config.ManagementCluster, deps Deps) []phase.Phase {
+	for _, p := range Phases(cfg, deps) {
+		if p.Name() == GitOpsPhase {
+			return []phase.Phase{p}
+		}
+	}
+	return nil
 }
 
 // BootstrapCluster is the Bootstrap cluster of a Management cluster.
