@@ -164,17 +164,32 @@ func rootAndSource(ctx context.Context, c ctrlclient.Client, root config.ObjectR
 
 // ready reports whether a Flux object is Ready on its current generation, and why not.
 func ready(u *unstructured.Unstructured) (bool, string) {
-	gen, _, _ := unstructured.NestedInt64(u.Object, "status", "observedGeneration")
 	cond, ok := condition(u, "Ready")
 	switch {
 	case !ok:
 		return false, describe(u) + " has no Ready condition yet"
-	case gen != u.GetGeneration():
+	case !current(u, cond):
 		return false, describe(u) + " hasn't seen its latest spec yet"
 	case cond["status"] != "True":
 		return false, fmt.Sprintf("%s isn't Ready: %v", describe(u), cond["message"])
 	}
 	return true, ""
+}
+
+// current reports whether the controller has seen u's latest spec: status.
+// observedGeneration where the kind has it (Flux's toolkit), else the condition's own
+// (flux-operator's FluxInstance), else true.
+func current(u *unstructured.Unstructured, cond map[string]any) bool {
+	if gen, ok, _ := unstructured.NestedInt64(u.Object, "status", "observedGeneration"); ok {
+		return gen == u.GetGeneration()
+	}
+	switch gen := cond["observedGeneration"].(type) {
+	case int64:
+		return gen == u.GetGeneration()
+	case float64:
+		return int64(gen) == u.GetGeneration()
+	}
+	return true
 }
 
 func condition(u *unstructured.Unstructured, t string) (map[string]any, bool) {
@@ -296,8 +311,7 @@ func handled(ctx context.Context, c ctrlclient.Client, obj *unstructured.Unstruc
 		// Only a settled verdict fails: Ready=False on the current generation, not while
 		// Flux is still reconciling. A source just created has no Ready condition yet.
 		cond, has := condition(live, "Ready")
-		gen, _, _ := unstructured.NestedInt64(live.Object, "status", "observedGeneration")
-		if r, _ := condition(live, "Reconciling"); r["status"] == "True" || !has || cond["status"] != "False" || gen != live.GetGeneration() {
+		if r, _ := condition(live, "Reconciling"); r["status"] == "True" || !has || cond["status"] != "False" || !current(live, cond) {
 			return false, nil
 		}
 		return false, errors.New(why)

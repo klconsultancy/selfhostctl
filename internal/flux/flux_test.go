@@ -78,6 +78,23 @@ func readyStatus(extra map[string]any) map[string]any {
 	return s
 }
 
+// FluxInstance reports its generation on the Ready condition, not in status.
+func TestReadyReadsTheConditionsGeneration(t *testing.T) {
+	inst := func(condGen int64) *unstructured.Unstructured {
+		u := obj(FluxInstanceGVK, "flux-system", "flux", map[string]any{"status": map[string]any{
+			"conditions": []any{map[string]any{"type": "Ready", "status": "True", "observedGeneration": condGen}},
+		}})
+		u.SetGeneration(3)
+		return u
+	}
+	if ok, why := ready(inst(3)); !ok {
+		t.Errorf("Ready on generation 3: %s", why)
+	}
+	if ok, _ := ready(inst(2)); ok {
+		t.Error("Ready on an older generation counted")
+	}
+}
+
 func TestCredentialRefusesEmptyFields(t *testing.T) {
 	for _, cr := range []Credential{
 		{Namespace: "flux-system", Name: "git", KnownHosts: "host ssh-ed25519 AAAA"},
