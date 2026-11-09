@@ -25,9 +25,13 @@ func (s *stub) Run(context.Context) error                    { s.st = phase.Stat
 func testApp(st phase.Status) app {
 	return app{
 		lookupEnv: func(string) (string, bool) { return "", false },
-		phases: func(*config.ManagementCluster) ([]phase.Phase, func(), error) {
+		phases: func(*config.ManagementCluster, bool) ([]phase.Phase, func(), error) {
 			return []phase.Phase{&stub{name: "bootstrap-cluster", st: st}}, func() {}, nil
 		},
+		locate: func(context.Context, *config.ManagementCluster) (string, string, error) {
+			return "none", "", nil
+		},
+		adopt: func(context.Context, *config.ManagementCluster) error { return nil },
 		exportBundle: func(context.Context, *config.ManagementCluster) ([]byte, error) {
 			return []byte("{\"kind\": \"RecoveryBundle\"}\n"), nil
 		},
@@ -72,7 +76,9 @@ func TestRun(t *testing.T) {
 		{name: "manual checkpoint", args: []string{"bootstrap", "-f", cfg}, st: phase.Status{State: phase.Manual, Reason: "add the deploy key"}, wantCode: exitCheckpoint, wantStderr: "manual checkpoint: add the deploy key"},
 		{name: "unknown --from", args: []string{"bootstrap", "-f", cfg, "--from", "pivot"}, wantCode: exitUsage, wantStderr: `no phase "pivot"`},
 		{name: "recovery export", args: []string{"recovery", "export", "-f", cfg}, wantStdout: "{\"kind\": \"RecoveryBundle\"}\n"},
-		{name: "status", args: []string{"status", "-f", cfg}, st: phase.Status{State: phase.Next}, wantStdout: "bootstrap-cluster    NEXT\n"},
+		{name: "status", args: []string{"status", "-f", cfg}, st: phase.Status{State: phase.Next}, wantStdout: "location: none\nbootstrap-cluster         NEXT\n"},
+		{name: "providers adopt", args: []string{"providers", "adopt", "-f", cfg}, wantStdout: "providers adopted\n"},
+		{name: "pivot starts at management-providers", args: []string{"pivot", "-f", cfg}, wantCode: exitUsage, wantStderr: `no phase "management-providers"`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

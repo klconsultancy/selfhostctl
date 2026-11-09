@@ -116,6 +116,52 @@ func (c Clusterctl) client(ctx context.Context, w Wanted) (clusterctlclient.Clie
 	return clusterctlclient.New(ctx, "", clusterctlclient.InjectConfig(cfg))
 }
 
+// Adopt stamps a cluster's providers with w's fingerprint, after checking that their
+// versions are what w declares: the operator asserts they run with w's variables.
+func (c Clusterctl) Adopt(ctx context.Context, kubeconfig []byte, w Wanted) error {
+	installed, err := c.Installed(ctx, kubeconfig)
+	if err != nil {
+		return err
+	}
+	if len(installed) == 0 {
+		return fmt.Errorf("the cluster has no providers")
+	}
+	if diffs := VersionsMatch(w, installed); len(diffs) > 0 {
+		return fmt.Errorf("the cluster's providers differ from the config, so they can't be adopted: %s", Summary(diffs))
+	}
+	return c.annotate(ctx, kubeconfig, Fingerprint(w.Variables))
+}
+
+// Move runs clusterctl move for one namespace, from one cluster to another.
+func (c Clusterctl) Move(ctx context.Context, from, to []byte, namespace string, dryRun bool) error {
+	dir, err := os.MkdirTemp("", "selfhostctl-")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	fromPath, toPath := filepath.Join(dir, "from"), filepath.Join(dir, "to")
+	if err := os.WriteFile(fromPath, from, 0o600); err != nil {
+		return err
+	}
+	if err := os.WriteFile(toPath, to, 0o600); err != nil {
+		return err
+	}
+	// Move reads no variables; the client only needs its config to exist.
+	cc, err := c.client(ctx, Wanted{})
+	if err != nil {
+		return err
+	}
+	if err := cc.Move(ctx, clusterctlclient.MoveOptions{
+		FromKubeconfig: clusterctlclient.Kubeconfig{Path: fromPath},
+		ToKubeconfig:   clusterctlclient.Kubeconfig{Path: toPath},
+		Namespace:      namespace,
+		DryRun:         dryRun,
+	}); err != nil {
+		return fmt.Errorf("clusterctl move: %w", err)
+	}
+	return nil
+}
+
 // annotate records the variables' fingerprint on every Provider object.
 func (c Clusterctl) annotate(ctx context.Context, kubeconfig []byte, fp string) error {
 	k, err := kube.Client(kubeconfig, clusterctlv1.AddToScheme)

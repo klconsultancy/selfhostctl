@@ -97,7 +97,7 @@ beforeApply:
 			t.Errorf("cleanup: %v", err)
 		}
 	})
-	deps := bootstrap.Deps{Docker: docker, NodesReady: bootstrap.LiveNodesReady}
+	deps := bootstrap.Deps{Docker: docker, NodesReady: bootstrap.LiveNodesReady, First: true}
 	if err := phase.Run(ctx, bootstrap.Phases(cfg, deps)[:1], "", io.Discard); err != nil {
 		t.Fatal(err)
 	}

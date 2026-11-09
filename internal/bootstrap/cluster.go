@@ -292,11 +292,16 @@ func joinDiffs(d []string) string {
 // --- kubeconfig ---
 
 // kubeconfigPhase writes the Management cluster's admin kubeconfig, as Cluster API
-// keeps it in the <cluster>-kubeconfig Secret, for the operator.
+// keeps it in the <cluster>-kubeconfig Secret, for the operator and as the tool's handle
+// to the Management cluster. It runs after the pivot too: when Cluster API renews the
+// certificate in the Secret, the file follows.
 type kubeconfigPhase struct {
 	cfg     *config.ManagementCluster
 	cluster *k0scontainer.Cluster
 	clients Clients
+	// source finds the cluster that holds the Secret; the Bootstrap cluster when nil.
+	source func(ctx context.Context) ([]byte, *phase.Status, error)
+	now    func() time.Time
 }
 
 func (p *kubeconfigPhase) Name() string { return "kubeconfig" }
@@ -306,7 +311,11 @@ func (p *kubeconfigPhase) want(ctx context.Context) ([]byte, string, *phase.Stat
 	if err != nil {
 		return nil, "", nil, err
 	}
-	kc, blocked, err := reach(ctx, p.cluster)
+	source := p.source
+	if source == nil {
+		source = func(ctx context.Context) ([]byte, *phase.Status, error) { return reach(ctx, p.cluster) }
+	}
+	kc, blocked, err := source(ctx)
 	if err != nil || blocked != nil {
 		return nil, path, blocked, err
 	}
@@ -330,11 +339,19 @@ func (p *kubeconfigPhase) Status(ctx context.Context) (phase.Status, error) {
 	if err != nil || blocked != nil {
 		return deref(blocked), err
 	}
+	note := path
+	now := time.Now
+	if p.now != nil {
+		now = p.now
+	}
+	if n := recovery.ExpiryNote(want, now(), 30*24*time.Hour); n != "" {
+		note += "; " + n
+	}
 	have, err := os.ReadFile(path)
 	if err == nil && bytes.Equal(have, want) {
-		return phase.Status{State: phase.Done, Reason: path}, nil
+		return phase.Status{State: phase.Done, Reason: note}, nil
 	}
-	return phase.Status{State: phase.Next, Reason: path}, nil
+	return phase.Status{State: phase.Next, Reason: note}, nil
 }
 
 func (p *kubeconfigPhase) Run(ctx context.Context) error {

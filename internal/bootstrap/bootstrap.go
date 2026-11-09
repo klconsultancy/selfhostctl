@@ -50,7 +50,44 @@ type Deps struct {
 	Lookup func(string) (string, bool)
 	// ClusterReadyTimeout bounds the wait for the Management cluster to be ready.
 	ClusterReadyTimeout time.Duration
+	// Mover moves the namespace between clusters; providers.Clusterctl outside tests.
+	Mover Mover
+	// First is `bootstrap --first`: the operator asserts no Management cluster exists
+	// yet, so a Bootstrap cluster may be created without a handle proving it.
+	First bool
+	// Probe reports whether something accepts connections at host:port; ProbeEndpoint when nil.
+	Probe func(ctx context.Context, hostport string) bool
+	// Now is time.Now outside tests.
+	Now func() time.Time
 }
+
+func (d *Deps) defaults() {
+	if d.Clients == nil {
+		d.Clients = LiveClients
+	}
+	if d.Lookup == nil {
+		d.Lookup = os.LookupEnv
+	}
+	if d.ClusterReadyTimeout == 0 {
+		d.ClusterReadyTimeout = 30 * time.Minute
+	}
+	if d.Probe == nil {
+		d.Probe = ProbeEndpoint
+	}
+	if d.Now == nil {
+		d.Now = time.Now
+	}
+}
+
+// Locate finds where the Management cluster's objects live now.
+func Locate(ctx context.Context, cfg *config.ManagementCluster, deps Deps) (Situation, error) {
+	deps.defaults()
+	l := &locator{cfg: cfg, cluster: BootstrapCluster(cfg, deps.Docker), clients: deps.Clients, probe: deps.Probe, now: deps.Now}
+	return l.get(ctx)
+}
+
+// PivotFrom is the first phase of `selfhostctl pivot`.
+const PivotFrom = "management-providers"
 
 // LiveNodesReady is Deps.NodesReady against a real cluster.
 func LiveNodesReady(ctx context.Context, kubeconfig []byte) (bool, error) {
@@ -63,25 +100,67 @@ func LiveNodesReady(ctx context.Context, kubeconfig []byte) (bool, error) {
 
 // Phases are bootstrap's phases, in order.
 func Phases(cfg *config.ManagementCluster, deps Deps) []phase.Phase {
-	if deps.Clients == nil {
-		deps.Clients = LiveClients
-	}
-	if deps.Lookup == nil {
-		deps.Lookup = os.LookupEnv
-	}
-	if deps.ClusterReadyTimeout == 0 {
-		deps.ClusterReadyTimeout = 30 * time.Minute
-	}
+	deps.defaults()
 	cluster := BootstrapCluster(cfg, deps.Docker)
-	return []phase.Phase{
-		newBootstrapClusterPhase(cfg, deps),
-		newProvidersPhase(cfg, deps),
-		newBeforeApplyPhase(cfg, deps),
-		&applyPhase{cfg: cfg, cluster: cluster, clients: deps.Clients},
-		&readyPhase{cfg: cfg, cluster: cluster, clients: deps.Clients, timeout: deps.ClusterReadyTimeout},
-		&recoveryBundlePhase{cfg: cfg, cluster: cluster, clients: deps.Clients, lookup: deps.Lookup},
-		&kubeconfigPhase{cfg: cfg, cluster: cluster, clients: deps.Clients},
+	loc := &locator{cfg: cfg, cluster: cluster, clients: deps.Clients, probe: deps.Probe, now: deps.Now}
+
+	onManagement := func(name string) func(ctx context.Context) ([]byte, *phase.Status, error) {
+		return func(ctx context.Context) ([]byte, *phase.Status, error) {
+			s, err := loc.get(ctx)
+			if err != nil {
+				return nil, nil, err
+			}
+			kc, blocked := managementKC(s, name)
+			return kc, blocked, nil
+		}
 	}
+	var forManagement []config.Prerequisite
+	for _, p := range cfg.BeforeApply {
+		if p.IsOn(config.OnManagement) {
+			forManagement = append(forManagement, p)
+		}
+	}
+	afterPivot := onManagement("move")
+	wanted := providers.FromConfig(&cfg.Providers)
+
+	phases := []phase.Phase{
+		guardedBootstrapCluster{Phase: newBootstrapClusterPhase(cfg, deps), loc: loc, first: deps.First},
+		prePivot{newProvidersPhase(cfg, deps), loc},
+		prePivot{newBeforeApplyPhase(cfg, deps), loc},
+		prePivot{&applyPhase{cfg: cfg, cluster: cluster, clients: deps.Clients}, loc},
+		prePivot{&readyPhase{cfg: cfg, cluster: cluster, clients: deps.Clients, timeout: deps.ClusterReadyTimeout}, loc},
+		prePivot{&recoveryBundlePhase{cfg: cfg, cluster: cluster, clients: deps.Clients, lookup: deps.Lookup}, loc},
+		&kubeconfigPhase{cfg: cfg, cluster: cluster, clients: deps.Clients, now: deps.Now, source: func(ctx context.Context) ([]byte, *phase.Status, error) {
+			// The Secret is where the Cluster's objects are: the Bootstrap cluster until the
+			// pivot, the Management cluster after it.
+			s, err := loc.get(ctx)
+			if err != nil {
+				return nil, nil, err
+			}
+			if s.Location == LocationManagement {
+				return s.ManagementKC, nil, nil
+			}
+			return reach(ctx, cluster)
+		}},
+		&managementProvidersPhase{loc: loc, wanted: wanted, installer: deps.Providers},
+		&prerequisitesPhase{name: "management-before-apply", entries: forManagement, prereqs: deps.Prerequisites, kc: onManagement("kubeconfig")},
+		&movePhase{cfg: cfg, loc: loc, installer: deps.Providers, mover: deps.Mover, clients: deps.Clients},
+		&prerequisitesPhase{name: "after-pivot", entries: cfg.AfterPivot, prereqs: deps.Prerequisites, kc: func(ctx context.Context) ([]byte, *phase.Status, error) {
+			s, err := loc.get(ctx)
+			if err != nil {
+				return nil, nil, err
+			}
+			if s.Location != LocationManagement || s.TargetPaused {
+				return nil, &phase.Status{State: phase.Blocked, Reason: "the Management cluster doesn't manage itself yet (phase move)"}, nil
+			}
+			return afterPivot(ctx)
+		}},
+		&deleteBootstrapPhase{cfg: cfg, loc: loc, cluster: cluster, clients: deps.Clients, now: deps.Now},
+	}
+	for i, p := range phases {
+		phases[i] = tracked{p, loc}
+	}
+	return phases
 }
 
 // BootstrapCluster is the Bootstrap cluster of a Management cluster.

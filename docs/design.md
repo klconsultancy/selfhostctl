@@ -66,6 +66,14 @@ Agreed 2026-11-08, for #9 onwards.
 | Lives | on the operator's machine, 0600 | in the secret store; in the environment only for the one command that reads it (`op run -- selfhostctl …`), never in `.envrc` or a shell profile |
 
 - After the pivot, `recovery-bundle` is done ("pivoted"): a `bootstrap` then doesn't read the bundle.
+- **Keeping the kubeconfig fresh:**
+
+  | Situation | What happens |
+  | --- | --- |
+  | every `bootstrap`/`pivot` run | the `kubeconfig` phase rewrites the file from the `<cluster>-kubeconfig` Secret, on the Management cluster after the pivot, so a certificate Cluster API renewed there reaches the file |
+  | the certificate expires within 30 days | `status` and the run warn |
+  | expired, or refused by the API | `locate` → `unknown`, blocked even with `--first`; the reason says to renew, not to remove the file |
+  | renew | `op run -- selfhostctl kubeconfig renew`: a client certificate signed by the bundle's CA, valid 30 days, as a bridge until the next run refreshes the file. The one use of the bundle outside a Recovery |
 
 **Fail closed:**
 
@@ -74,6 +82,7 @@ Agreed 2026-11-08, for #9 onwards.
 | kubeconfig present, `locate` → `none` | creates the Bootstrap cluster |
 | no kubeconfig | blocked: "no kubeconfig at `<path>`: copy it there, or run with `--first` if this is the cluster's first bootstrap" |
 | `--first` | creates it; covers only that run |
-| `--first`, and a known endpoint (from the manifests, e.g. a ProxmoxCluster) answers TLS | refused |
+| `--first`, and a kubeconfig that doesn't answer, has expired or is refused | refused |
+| `--first`, and a known endpoint (from the manifests, e.g. a ProxmoxCluster) accepts connections | refused |
 
 **#9 adds:** the e2e runs `bootstrap` after the pivot (nothing runs, no Bootstrap cluster appears) and without the kubeconfig (blocked). `recovery export` also works from the Management cluster.

@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"sigs.k8s.io/yaml"
 
@@ -36,6 +37,9 @@ type ManagementCluster struct {
 	// BeforeApply is installed before the cluster is applied, e.g. an API proxy the
 	// infrastructure provider talks to, or a Secret the machines read at boot.
 	BeforeApply []Prerequisite `json:"beforeApply,omitempty"`
+	// AfterPivot is installed on the Management cluster once it manages itself, before
+	// the Bootstrap cluster goes. Entries take no clusters.
+	AfterPivot []Prerequisite `json:"afterPivot,omitempty"`
 	// Cluster is the Management cluster's own definition.
 	Cluster Cluster `json:"cluster"`
 	// Recovery is how the Management cluster is recovered when its machines are gone.
@@ -205,6 +209,18 @@ type BootstrapCluster struct {
 	Network string `json:"network,omitempty"`
 	// ExtraMounts are bind mounts from the host, e.g. the Docker socket for CAPD.
 	ExtraMounts []Mount `json:"extraMounts,omitempty"`
+	// DeleteAfterStable is how long the Management cluster must manage itself, with no
+	// machine replaced, before the Bootstrap cluster is deleted. Default 10m.
+	DeleteAfterStable string `json:"deleteAfterStable,omitempty"`
+}
+
+// StableWindow is DeleteAfterStable as a duration.
+func (b BootstrapCluster) StableWindow() time.Duration {
+	d, err := time.ParseDuration(b.DeleteAfterStable)
+	if err != nil || b.DeleteAfterStable == "" {
+		return 10 * time.Minute
+	}
+	return d
 }
 
 type Mount struct {
@@ -247,8 +263,15 @@ func (c *ManagementCluster) checkFiles() []string {
 	if _, err := os.Stat(c.Path(c.Cluster.Manifests)); err != nil {
 		problems = append(problems, fmt.Sprintf("cluster.manifests: %v", err))
 	}
+	entries := map[string]Prerequisite{}
 	for i, p := range c.BeforeApply {
-		at := fmt.Sprintf("beforeApply[%d]", i)
+		entries[fmt.Sprintf("beforeApply[%d]", i)] = p
+	}
+	for i, p := range c.AfterPivot {
+		entries[fmt.Sprintf("afterPivot[%d]", i)] = p
+	}
+	for _, at := range slices.Sorted(maps.Keys(entries)) {
+		p := entries[at]
 		var files []string
 		if p.Manifest != nil {
 			files = append(files, p.Manifest.Path)
@@ -269,7 +292,7 @@ func (c *ManagementCluster) checkFiles() []string {
 // as ${VAR}: manifests and Helm values.
 func (c *ManagementCluster) FileEnvRefs() ([]string, error) {
 	var names []string
-	for _, p := range c.BeforeApply {
+	for _, p := range append(slices.Clone(c.BeforeApply), c.AfterPivot...) {
 		var file string
 		switch {
 		case p.Manifest != nil:
@@ -401,6 +424,19 @@ func (c *ManagementCluster) validate() []string {
 	}
 	for i, p := range c.BeforeApply {
 		problems = append(problems, p.validate(fmt.Sprintf("beforeApply[%d]", i))...)
+	}
+	for i, p := range c.AfterPivot {
+		at := fmt.Sprintf("afterPivot[%d]", i)
+		if len(p.Clusters) > 0 {
+			problems = append(problems, at+".clusters: not taken; afterPivot is for the Management cluster")
+		}
+		p.Clusters = []string{OnManagement}
+		problems = append(problems, p.validate(at)...)
+	}
+	if b := c.BootstrapCluster.DeleteAfterStable; b != "" {
+		if d, err := time.ParseDuration(b); err != nil || d < 0 {
+			problems = append(problems, fmt.Sprintf("bootstrapCluster.deleteAfterStable: %q is not a duration like 10m", b))
+		}
 	}
 	for i, m := range c.BootstrapCluster.ExtraMounts {
 		at := fmt.Sprintf("bootstrapCluster.extraMounts[%d]", i)
