@@ -78,7 +78,7 @@ None of the `recovery` variables has to be set to start a bootstrap: the checkpo
 
 | Field | Required | Meaning |
 | --- | --- | --- |
-| `gitops.flux` | with `gitops` | Flux, from the cluster's own definition (e.g. a k0s Helm extension with flux-operator and a FluxInstance). The tool doesn't install it; the `gitops` phase gives it its credential and checks that it syncs. Without `gitops`, nothing touches Flux. |
+| `gitops.flux` | with `gitops` | Flux, from the cluster's own definition (e.g. a k0s Helm extension with flux-operator and a FluxInstance). The tool doesn't install it; the `gitops` phase gives it its credential and checks that it syncs. Without `gitops`, nothing touches Flux: a config without it is valid, for a cluster that has no GitOps or brings its own. |
 | `gitops.flux.credentialSecret.name`, `.namespace` | yes | The Secret the FluxInstance's `sync.pullSecret` names, in its namespace. |
 | `gitops.flux.credentialSecret.fromEnv` | yes | The variable holding the SSH private key (the Secret's `identity`). Required for every command, like the other variables the config names. |
 | `gitops.flux.credentialSecret.knownHosts` | yes | A file with the git server's host keys, in `known_hosts` format (the Secret's `known_hosts`). Public: keep it next to the config. |

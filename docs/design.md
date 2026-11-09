@@ -93,6 +93,9 @@ Agreed 2026-11-09, for #10.
 
 | Decision | Choice |
 | --- | --- |
+| GitOps required | no. A config without `gitops` is valid: the `gitops` phase is done, `gitops sync` is a usage error, `recover` doesn't suspend anything |
+| Tools | one key per tool under `gitops`, `flux` the one so far (like `recovery.profile`). Another tool is a new key, not a change to `flux` |
+| Seam | `recover` (#11, #12) talks to a small interface (suspend, resume, list suspended), not to Flux. Flux is its one implementation |
 | Who installs Flux | the cluster's own definition (e.g. a k0s Helm extension: flux-operator and a FluxInstance). Never the tool |
 | Where the phase runs | `gitops`, after `after-pivot`, before `delete-bootstrap-cluster`: the stable window covers Flux's first sync, and the Bootstrap cluster stays until then |
 | Why after `move` | the credential is what lets Flux fetch. Written only once the Management cluster manages itself, so Flux never applies objects a move is about to create |

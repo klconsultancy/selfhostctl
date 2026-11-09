@@ -537,7 +537,7 @@ func (g *GitOps) validate() []string {
 		return nil
 	}
 	if g.Flux == nil {
-		return []string{"gitops.flux: required with gitops"}
+		return []string{"gitops.flux: required with gitops: flux is the one GitOps tool selfhostctl has"}
 	}
 	var problems []string
 	s := g.Flux.CredentialSecret
