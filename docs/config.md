@@ -31,6 +31,13 @@ recovery:
   bundleFromEnv: MANAGEMENT_RECOVERY_BUNDLE
   encryptionKeyFromEnv: MANAGEMENT_ENCRYPTION_KEY
   kine: {datasourceFromEnv: MANAGEMENT_KINE_DATASOURCE}
+gitops:
+  flux:
+    credentialSecret:
+      name: flux-git
+      namespace: flux-system
+      fromEnv: MANAGEMENT_FLUX_DEPLOY_KEY
+      knownHosts: known_hosts
 beforeApply:
   - manifest: {path: bootstrap-secret.yaml}
     clusters: [bootstrap]
@@ -68,6 +75,14 @@ Relative paths are relative to the config file.
 | `recovery.kine.datasourceFromEnv` | with `k0smotron-kine` | The variable holding kine's data source, e.g. `postgres://user:password@host:5432/db`. |
 
 None of the `recovery` variables has to be set to start a bootstrap: the checkpoint asks for them once the cluster exists.
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `gitops.flux` | with `gitops` | Flux, from the cluster's own definition (e.g. a k0s Helm extension with flux-operator and a FluxInstance). The tool doesn't install it; the `gitops` phase gives it its credential and checks that it syncs. Without `gitops`, nothing touches Flux. |
+| `gitops.flux.credentialSecret.name`, `.namespace` | yes | The Secret the FluxInstance's `sync.pullSecret` names, in its namespace. |
+| `gitops.flux.credentialSecret.fromEnv` | yes | The variable holding the SSH private key (the Secret's `identity`). Required for every command, like the other variables the config names. |
+| `gitops.flux.credentialSecret.knownHosts` | yes | A file with the git server's host keys, in `known_hosts` format (the Secret's `known_hosts`). Public: keep it next to the config. |
+| `gitops.flux.root` | no | `{namespace, name}` of the Kustomization that syncs everything else; `flux-system/flux-system` (flux-operator's) when empty. |
 
 | Field | Required | Meaning |
 | --- | --- | --- |

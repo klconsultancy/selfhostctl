@@ -24,7 +24,7 @@ func (s *stub) Run(context.Context) error                    { s.st = phase.Stat
 
 func testApp(st phase.Status) app {
 	return app{
-		lookupEnv: func(string) (string, bool) { return "", false },
+		lookupEnv: func(k string) (string, bool) { return map[string]string{"FLUX_KEY": "key"}[k], k == "FLUX_KEY" },
 		phases: func(*config.ManagementCluster, bool) ([]phase.Phase, func(), error) {
 			return []phase.Phase{&stub{name: "bootstrap-cluster", st: st}}, func() {}, nil
 		},
@@ -32,6 +32,12 @@ func testApp(st phase.Status) app {
 			return "none", "", nil
 		},
 		adopt: func(context.Context, *config.ManagementCluster) error { return nil },
+		gitopsPhases: func(*config.ManagementCluster) ([]phase.Phase, func(), error) {
+			return []phase.Phase{&stub{name: "gitops", st: st}}, func() {}, nil
+		},
+		suspended: func(context.Context, *config.ManagementCluster) ([]string, error) {
+			return []string{"Kustomization apps/web"}, nil
+		},
 		exportBundle: func(context.Context, *config.ManagementCluster) ([]byte, error) {
 			return []byte("{\"kind\": \"RecoveryBundle\"}\n"), nil
 		},
@@ -53,6 +59,9 @@ func configFile(t *testing.T, content string) string {
 }
 
 const validConfig = "apiVersion: selfhostctl/v1alpha1\nkind: ManagementCluster\nmetadata:\n  name: management\nproviders:\n  bootstrap: [{name: k0sproject-k0smotron, version: v2.3.0}]\n  controlPlane: [{name: k0sproject-k0smotron, version: v2.3.0}]\n  infrastructure: [{name: docker, version: v1.14.4}]\ncluster:\n  manifests: cluster.yaml\n  namespace: mgmt\n"
+
+// gitopsConfig names a known_hosts file configFile writes anyway.
+const gitopsConfig = "gitops:\n  flux:\n    credentialSecret: {name: flux-git, namespace: flux-system, fromEnv: FLUX_KEY, knownHosts: cluster.yaml}\n"
 
 func TestRun(t *testing.T) {
 	cfg := configFile(t, validConfig)
@@ -76,7 +85,9 @@ func TestRun(t *testing.T) {
 		{name: "manual checkpoint", args: []string{"bootstrap", "-f", cfg}, st: phase.Status{State: phase.Manual, Reason: "add the deploy key"}, wantCode: exitCheckpoint, wantStderr: "manual checkpoint: add the deploy key"},
 		{name: "unknown --from", args: []string{"bootstrap", "-f", cfg, "--from", "pivot"}, wantCode: exitUsage, wantStderr: `no phase "pivot"`},
 		{name: "recovery export", args: []string{"recovery", "export", "-f", cfg}, wantStdout: "{\"kind\": \"RecoveryBundle\"}\n"},
-		{name: "status", args: []string{"status", "-f", cfg}, st: phase.Status{State: phase.Next}, wantStdout: "location: none\nbootstrap-cluster         NEXT\n"},
+		{name: "status", args: []string{"status", "-f", cfg}, st: phase.Status{State: phase.Next}, wantStdout: "location: none\nwarning: Kustomization apps/web is suspended\nbootstrap-cluster         NEXT\n"},
+		{name: "gitops sync without gitops", args: []string{"gitops", "sync", "-f", cfg}, wantCode: exitUsage, wantStderr: "the config has no gitops"},
+		{name: "gitops sync", args: []string{"gitops", "sync", "-f", configFile(t, validConfig+gitopsConfig)}, st: phase.Status{State: phase.Next}, wantStdout: "gitops: running\ngitops: done\n"},
 		{name: "providers adopt", args: []string{"providers", "adopt", "-f", cfg}, wantStdout: "providers adopted\n"},
 		{name: "pivot starts at management-providers", args: []string{"pivot", "-f", cfg}, wantCode: exitUsage, wantStderr: `no phase "management-providers"`},
 	}

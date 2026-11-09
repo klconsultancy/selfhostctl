@@ -21,6 +21,7 @@ import (
 	"github.com/klconsultancy/selfhostctl/internal/bootstrap"
 	"github.com/klconsultancy/selfhostctl/internal/config"
 	"github.com/klconsultancy/selfhostctl/internal/dockerhost"
+	"github.com/klconsultancy/selfhostctl/internal/flux"
 	"github.com/klconsultancy/selfhostctl/internal/phase"
 	"github.com/klconsultancy/selfhostctl/internal/providers"
 	"github.com/klconsultancy/selfhostctl/internal/recovery"
@@ -58,6 +59,11 @@ type app struct {
 	exportBundle func(ctx context.Context, cfg *config.ManagementCluster) ([]byte, error)
 	// adopt stamps the Management cluster's providers with the config's fingerprint.
 	adopt func(ctx context.Context, cfg *config.ManagementCluster) error
+	// gitopsPhases is the gitops phase alone, for `gitops sync`.
+	gitopsPhases func(cfg *config.ManagementCluster) ([]phase.Phase, func(), error)
+	// suspended lists the Management cluster's suspended Flux objects; none before
+	// the pivot.
+	suspended func(ctx context.Context, cfg *config.ManagementCluster) ([]string, error)
 }
 
 // liveDeps are bootstrap's dependencies on the real world.
@@ -140,6 +146,34 @@ func liveApp() app {
 			}
 			defer done()
 			return deps.Providers.(providers.Clusterctl).Adopt(ctx, kc, providers.FromConfig(&cfg.Providers))
+		},
+		gitopsPhases: func(cfg *config.ManagementCluster) ([]phase.Phase, func(), error) {
+			deps, done, err := liveDeps(cfg, false)
+			if err != nil {
+				return nil, nil, err
+			}
+			return bootstrap.GitOpsPhases(cfg, deps), done, nil
+		},
+		suspended: func(ctx context.Context, cfg *config.ManagementCluster) ([]string, error) {
+			deps, done, err := liveDeps(cfg, false)
+			if err != nil {
+				return nil, err
+			}
+			defer done()
+			s, err := bootstrap.Locate(ctx, cfg, deps)
+			if err != nil || s.Location != bootstrap.LocationManagement || s.ManagementKC == nil {
+				return nil, err
+			}
+			c, err := bootstrap.LiveClients(s.ManagementKC)
+			if err != nil {
+				return nil, err
+			}
+			refs, err := flux.Suspended(ctx, c)
+			out := make([]string, len(refs))
+			for i, r := range refs {
+				out[i] = r.String()
+			}
+			return out, err
 		},
 	}
 }
@@ -344,6 +378,32 @@ func newRoot(a app, stdout io.Writer) *cobra.Command {
 	})
 	root.AddCommand(kubeconfigCmd)
 
+	gitopsCmd := &cobra.Command{Use: "gitops", Short: "Flux on the Management cluster", Args: cobra.NoArgs}
+	gitopsCmd.AddCommand(&cobra.Command{
+		Use:   "sync",
+		Short: "Give Flux its git credential and wait until it synced, against the live Management cluster",
+		Long: "Runs bootstrap's gitops phase alone: writes the credential Secret when it differs,\n" +
+			"then has Flux fetch and apply the root Kustomization now. Done already: nothing is\n" +
+			"written. Flux itself comes from the cluster's own definition.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg, err := load()
+			if err != nil {
+				return classify(err)
+			}
+			if cfg.GitOps == nil {
+				return &exitError{exitUsage, errors.New("the config has no gitops")}
+			}
+			phases, done, err := a.gitopsPhases(cfg)
+			if err != nil {
+				return classify(err)
+			}
+			defer done()
+			return classify(phase.Run(cmd.Context(), phases, "", stdout))
+		},
+	})
+	root.AddCommand(gitopsCmd)
+
 	recoveryCmd := &cobra.Command{Use: "recovery", Short: "The Recovery bundle", Args: cobra.NoArgs}
 	recoveryCmd.AddCommand(&cobra.Command{
 		Use:   "export",
@@ -384,6 +444,15 @@ func newRoot(a app, stdout io.Writer) *cobra.Command {
 				location += " (" + why + ")"
 			}
 			_, _ = fmt.Fprintf(stdout, "location: %s\n", location)
+			if a.suspended != nil {
+				refs, err := a.suspended(cmd.Context(), cfg)
+				if err != nil {
+					return classify(err)
+				}
+				for _, r := range refs {
+					_, _ = fmt.Fprintf(stdout, "warning: %s is suspended\n", r)
+				}
+			}
 			phases, done, err := a.phases(cfg, false)
 			if err != nil {
 				return classify(err)

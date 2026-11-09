@@ -86,3 +86,31 @@ Agreed 2026-11-08, for #9 onwards.
 | `--first`, and a known endpoint (from the manifests, e.g. a ProxmoxCluster) accepts connections | refused |
 
 **#9 adds:** the e2e runs `bootstrap` after the pivot (nothing runs, no Bootstrap cluster appears) and without the kubeconfig (blocked). `recovery export` also works from the Management cluster.
+
+## GitOps
+
+Agreed 2026-11-09, for #10.
+
+| Decision | Choice |
+| --- | --- |
+| Who installs Flux | the cluster's own definition (e.g. a k0s Helm extension: flux-operator and a FluxInstance). Never the tool |
+| Where the phase runs | `gitops`, after `after-pivot`, before `delete-bootstrap-cluster`: the stable window covers Flux's first sync, and the Bootstrap cluster stays until then |
+| Why after `move` | the credential is what lets Flux fetch. Written only once the Management cluster manages itself, so Flux never applies objects a move is about to create |
+| Credential Secret | `identity` from `gitops.flux.credentialSecret.fromEnv`; `known_hosts` from the `knownHosts` file next to the config (public, in git). Never a key scan: that trusts whatever answers |
+| Write guard | an empty field is refused before anything is written, so an empty value never replaces a working key. Server-side apply, dry run first: unchanged → no write |
+| Root | `gitops.flux.root` `{namespace, name}`, default `flux-system/flux-system` (flux-operator's sync name). Its source is the root's `sourceRef` |
+| Done | the Secret is unchanged; every FluxInstance is Ready; the source is Ready on its generation; the root is Ready and applied the source's revision |
+| Run | requests a reconcile of the source (`reconcile.fluxcd.io/requestedAt`) and waits until Flux handled that request and is Ready: a fetch of the branch now, not the last good artifact. Then the same for the root |
+| Source fails (e.g. authentication) | fails at once with Flux's message |
+| No Flux CRDs in time | blocked: "is Flux in the cluster's definition?" |
+| `gitops sync` | the `gitops` phase alone, against the live Management cluster; done → nothing is written |
+
+**Suspend and resume** (for `recover`, #11 and #12):
+
+| | Suspend | Resume |
+| --- | --- | --- |
+| Set | every Kustomization and HelmRelease in the cluster, from live state | those suspend marked (`selfhostctl.io/suspended`) |
+| Order | the root first (no self-sync undoes the rest), then Kustomizations, then HelmReleases | the reverse: the root last |
+| Already suspended by the operator | left alone, not marked | stays suspended |
+
+- `status` prints a warning for every suspended Kustomization and HelmRelease.

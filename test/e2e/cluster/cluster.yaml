@@ -98,6 +98,34 @@ spec:
             enabled: false
         telemetry:
           enabled: false
+        # Flux, as the first user installs it: flux-operator and a FluxInstance that
+        # syncs the e2e's git server. It can't fetch until selfhostctl's gitops phase
+        # writes the flux-git Secret.
+        extensions:
+          helm:
+            charts:
+              - name: flux-operator
+                chartname: oci://ghcr.io/controlplaneio-fluxcd/charts/flux-operator
+                version: "0.62.1"
+                namespace: flux-system
+                order: 1
+              - name: flux-instance
+                chartname: oci://ghcr.io/controlplaneio-fluxcd/charts/flux-instance
+                version: "0.62.1"
+                namespace: flux-system
+                order: 2
+                values: |
+                  instance:
+                    distribution:
+                      version: "2.x"
+                    cluster:
+                      networkPolicy: false
+                    sync:
+                      kind: GitRepository
+                      url: ssh://git@selfhostctl-e2e-git/srv/fleet.git
+                      ref: refs/heads/main
+                      path: clusters/mgmt
+                      pullSecret: flux-git
   machineTemplate:
     spec:
       infrastructureRef:
