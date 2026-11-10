@@ -143,6 +143,8 @@ Agreed 2026-11-09, for #11 and #12. Profile `k0smotron-kine`.
 
 **Phases (#11):** `outage`, `datastore`, `bootstrap-cluster`, `host`, `providers`, `before-apply`, `break-glass`, `webhooks`, `suspend-gitops`, `pause-children`, `delete-nodes`, `move-to-bootstrap`, `delete-break-glass`. Every phase from `break-glass` to `delete-nodes` is done ("moved") once the Bootstrap cluster holds the objects.
 
+**Phases (#12), in the same `recover`:** `infrastructure`, `replace-machines`, `ready`, `move-to-management`, `restore-webhooks`, `leftovers`, `resume-gitops`, `unpause-children`, `delete-bootstrap-cluster`. The first three are done ("moved back") once the objects are in, or on their way to, the Management cluster. A Recovery ends when the Bootstrap cluster goes; `recover` then finds nothing to recover.
+
 **Proof of the outage** (`datastore`, before anything starts on the datastore). `outage` only sees that the API doesn't answer from here; a cut-off VPN or API proxy looks the same. The Break-glass controller would then run next to a live cluster, and every later step changes it.
 
 | | Choice |
@@ -165,10 +167,33 @@ Agreed 2026-11-09, for #11 and #12. Profile `k0smotron-kine`.
 | Local config | `api.extraArgs` and `storage` from the manifest, with `storage.kine.dataSource` from the environment; `network.podCIDR`, `serviceCIDR`. Fixed: `externalAddress` = the bundle's endpoint host, SANs `127.0.0.1` and `localhost`, the API published on localhost only |
 | PKI | the bundle's CA, service-account key and front-proxy CA, written to `/var/lib/k0s/pki` before the container starts |
 | Encryption | at the path in `api.extraArgs.encryption-provider-config`: `aescbc` with key `key1`, then `identity`. The machines' config must use that format |
-| Saved webhooks | ConfigMap `kube-system/selfhostctl-recovery-webhooks` in the Bootstrap cluster, key `webhooks.json`: a `List` of the Validating and MutatingWebhookConfigurations labelled `cluster.x-k8s.io/provider`, without uid, resourceVersion and managedFields. Saved once, never re-read; gone with the Bootstrap cluster. Not in the cluster's namespace: `move` would carry it |
+| Saved webhooks | ConfigMap `kube-system/selfhostctl-recovery-webhooks` in the Bootstrap cluster, key `webhooks.json`: a `List` of the Validating and MutatingWebhookConfigurations labelled `cluster.x-k8s.io/provider`, without uid, resourceVersion and managedFields. Saved once; `restore-webhooks` reads them back; gone with the Bootstrap cluster. Not in the cluster's namespace: `move` would carry it |
 | GitOps | through the seam (#gitops): suspended on the Break-glass controller. No `gitops` in the config: done |
 | Children | every `Cluster` outside the Management cluster's namespace: `spec.paused: true` and the marker `selfhostctl.io/paused`. One the operator paused is left alone and stays paused |
 | Nodes | every Node on the Break-glass controller is deleted: a new machine with a reused IP would match an old one |
 | Move | Break-glass controller → Bootstrap cluster, behind the pivot's gates; dry run first; a split resumes |
 | `status` | warns for every suspended GitOps object and every paused `Cluster`, read from the Break-glass controller while it runs, else from the Management cluster |
+
+**The second half (#12).** Researched against k0smotron v2.3.0 and CAPI v1.14.4 (CAPD):
+
+| Fact | Consequence |
+| --- | --- |
+| CAPD doesn't recreate the container of a provisioned DockerMachine | the old Machines must be deleted |
+| k0smotron's pre-terminate hook (`kcp-cleanup`) on each control-plane Machine asks the workload API, which is down: the deletion never ends, and the control plane creates no new Machine meanwhile | `recover` removes that hook from the old Machines |
+| CAPI drains a Machine with a Node, and waits for its volumes, through the workload API | `machine.cluster.x-k8s.io/exclude-node-draining` and `exclude-wait-for-node-volume-detach` on the old Machines |
+| With no old Machine left, k0smotron starts the first new one without a join token, from the CA secrets and `spec.k0s` (the same kine data source); later ones join through the API once the first answers | the new control plane comes up on the datastore; whether k0s does is what the e2e proves |
+
+| Decision | Choice |
+| --- | --- |
+| Infrastructure adapter | `infrastructure.adapter`, optional: `none` (the default, which CAPD needs) does nothing. Like a phase: Status and Run on the old Machines, before they are deleted; blocked blocks `recover`. #13 adds `capmox` and an outage check |
+| Old Machines | the Cluster's Machines when `replace-machines` first runs, recorded by name in the recovery ConfigMap (key `machines.json`). Only those are deleted: a re-run never touches the new ones |
+| Deleting them | control plane and workers at once: the annotations above, `pre-terminate.delete.hook.machine.cluster.x-k8s.io/kcp-cleanup` removed, then deleted, waited for (10 min) |
+| Other lifecycle hooks | any other `pre-drain.delete.hook…` or `pre-terminate.delete.hook…` on an old Machine blocks, naming it, before any Machine is deleted: its owner's cleanup is the operator's call. Not chosen: removing every hook (an unknown owner's cleanup would be skipped silently) |
+| `ready` | the pivot's condition (#8), on the Bootstrap cluster |
+| Back | the pivot's move and gates, Bootstrap cluster → Management cluster. Providers that differ: upgrade the Management cluster's first |
+| Webhooks | the saved ones created again where missing |
+| Leftovers | for the Break-glass controller and every old Machine: its autopilot `ControlNode` and its leases `kube-node-lease/k0s-ctrl-<name>` and `<name>`, which the removed hook would have deleted |
+| GitOps | through the seam: what `suspend-gitops` marked, resumed, the root last |
+| Children | each one `pause-children` marked, unpaused (marker removed) once the Management cluster is healthy (as for `delete-bootstrap-cluster`) and the child's API, through Cluster API's Secret `<name>-kubeconfig`, answers with every Node Ready. One that doesn't stays paused: blocked after 10 min, a re-run tries again |
+| Bootstrap cluster | deleted under the pivot's stability conditions (#9) |
 

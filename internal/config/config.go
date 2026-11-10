@@ -48,6 +48,9 @@ type ManagementCluster struct {
 	// GitOps is how the Management cluster's GitOps controller gets its credential.
 	// Without it, bootstrap ends without touching GitOps.
 	GitOps *GitOps `json:"gitops,omitempty"`
+	// Infrastructure is what recover asks of the infrastructure of the machines it
+	// replaces. Without it, nothing.
+	Infrastructure *Infrastructure `json:"infrastructure,omitempty"`
 
 	// dir is the config file's directory; relative paths in the config are relative to
 	// it.
@@ -66,6 +69,26 @@ type Cluster struct {
 	// Kubeconfig is where bootstrap writes the Management cluster's admin kubeconfig;
 	// ~/.kube/<metadata.name>.kubeconfig when empty.
 	Kubeconfig string `json:"kubeconfig,omitempty"`
+}
+
+// Infrastructure names the Infrastructure adapter: none, the default, does nothing.
+type Infrastructure struct {
+	Adapter string `json:"adapter,omitempty"`
+}
+
+// AdapterName is the adapter, "none" when unset.
+func (i *Infrastructure) AdapterName() string {
+	if i == nil || i.Adapter == "" {
+		return "none"
+	}
+	return i.Adapter
+}
+
+func (i *Infrastructure) validate() []string {
+	if n := i.AdapterName(); n != "none" {
+		return []string{fmt.Sprintf("infrastructure.adapter: %q: the adapters are none", n)}
+	}
+	return nil
 }
 
 // GitOps names the GitOps controller. Flux is the one there is.
@@ -470,6 +493,7 @@ func (c *ManagementCluster) validate() []string {
 		}
 	}
 	problems = append(problems, c.GitOps.validate()...)
+	problems = append(problems, c.Infrastructure.validate()...)
 	for i, p := range c.BeforeApply {
 		problems = append(problems, p.validate(fmt.Sprintf("beforeApply[%d]", i))...)
 	}

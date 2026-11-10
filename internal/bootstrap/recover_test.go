@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -12,10 +14,12 @@ import (
 	"time"
 
 	admissionv1 "k8s.io/api/admissionregistration/v1"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/klconsultancy/selfhostctl/internal/breakglass"
@@ -70,7 +74,10 @@ var recoveryEnv = map[string]string{
 // Break-glass controller will serve.
 func down(t *testing.T) *world {
 	t.Helper()
-	kcp := obj(breakglass.K0sControlPlaneGVK, "mgmt", map[string]any{"spec": map[string]any{"version": "v1.36.5+k0s.0"}})
+	kcp := obj(breakglass.K0sControlPlaneGVK, "mgmt", map[string]any{
+		"spec":   map[string]any{"version": "v1.36.5+k0s.0", "replicas": int64(1)},
+		"status": map[string]any{"readyReplicas": int64(1)},
+	})
 	child := obj(clusterGVK, "child", map[string]any{"spec": map[string]any{"paused": false}})
 	child.SetNamespace("children")
 	own := obj(clusterGVK, "kept", map[string]any{"spec": map[string]any{"paused": true}})
@@ -87,15 +94,77 @@ func down(t *testing.T) *world {
 	}
 	root := obj(flux.KustomizationGVK, "flux-system", map[string]any{"spec": map[string]any{}})
 	root.SetNamespace("flux-system")
-	return &world{
-		docker:     running(t),
-		bootstrap:  newFake(),
-		kubeconfig: kubeconfigFile(t),
-		breakGlass: newFake(theCluster(false), kcp, child, own, root,
-			hook("validating", "capi-validating", true), hook("mutating", "capi-mutating", true), hook("validating", "someone-elses", false),
-			&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "mgmt-old-1"}}, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "mgmt-old-2"}}),
-		env: recoveryEnv,
+	lease := func(name string) *coordinationv1.Lease {
+		return &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Namespace: "kube-node-lease", Name: name}}
 	}
+	controlNode := func(name string) *unstructured.Unstructured {
+		u := obj(controlNodeGVK, name, map[string]any{})
+		u.SetNamespace("")
+		return u
+	}
+	cluster := theCluster(false, "ControlPlaneAvailable", "True", "Available", "True", "RemoteConnectionProbe", "True")
+	_ = unstructured.SetNestedStringMap(cluster.Object, map[string]string{
+		"apiGroup": "controlplane.cluster.x-k8s.io", "kind": "K0sControlPlane", "name": "mgmt"}, "spec", "controlPlaneRef")
+	w := &world{
+		docker:     running(t),
+		kubeconfig: kubeconfigFile(t),
+		breakGlass: newFake(cluster, kcp, child, own, root,
+			oldMachine("mgmt-old-1"), oldMachine("mgmt-old-2"),
+			hook("validating", "capi-validating", true), hook("mutating", "capi-mutating", true), hook("validating", "someone-elses", false),
+			&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "mgmt-old-1"}}, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "mgmt-old-2"}},
+			// What the old machines and the Break-glass controller leave behind; and
+			// another's lease.
+			lease("k0s-ctrl-mgmt-old-1"), lease("mgmt-old-1"), lease("k0s-ctrl-selfhostctl-mgmt-break-glass"), lease("someone-elses"),
+			controlNode("mgmt-old-1"), controlNode("selfhostctl-mgmt-break-glass"),
+			&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "children", Name: "child-kubeconfig"}, Data: map[string][]byte{"value": []byte(childKC)}}),
+		child: newFake(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "child-1"}, Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}}}),
+		env:   recoveryEnv,
+	}
+	w.bootstrap = kcpSim{Client: newFake(), w: w}
+	return w
+}
+
+// childKC is the Child cluster's kubeconfig, as its Secret holds it.
+const childKC = "child\n"
+
+func oldMachine(name string) *unstructured.Unstructured {
+	m := obj(machineListGVK.GroupVersion().WithKind("Machine"), name, map[string]any{})
+	m.SetLabels(map[string]string{"cluster.x-k8s.io/cluster-name": "mgmt"})
+	m.SetAnnotations(map[string]string{preTerminateHookPref + "/kcp-cleanup": ""})
+	return m
+}
+
+// kcpSim is the Bootstrap cluster with k0smotron's control plane in it: an old
+// Machine deleted, it creates a new one, which comes up on the datastore. The
+// Management cluster then answers, on the Break-glass controller's datastore.
+type kcpSim struct {
+	ctrlclient.Client
+	w *world
+}
+
+func (k kcpSim) Delete(ctx context.Context, o ctrlclient.Object, opts ...ctrlclient.DeleteOption) error {
+	u, old := o.(*unstructured.Unstructured)
+	old = old && u.GetKind() == "Machine" && strings.HasPrefix(u.GetName(), "mgmt-old-")
+	live := &unstructured.Unstructured{}
+	if old {
+		live.SetGroupVersionKind(u.GroupVersionKind())
+		_ = k.Get(ctx, ctrlclient.ObjectKeyFromObject(u), live)
+	}
+	if err := k.Client.Delete(ctx, o, opts...); err != nil {
+		return err
+	}
+	if old {
+		// What it was deleted with: the annotations that let CAPI delete it.
+		k.w.deleted = append(k.w.deleted, u.GetName()+" "+fmt.Sprint(live.GetAnnotations()))
+		m := obj(machineListGVK.GroupVersion().WithKind("Machine"), strings.Replace(u.GetName(), "old", "new", 1),
+			map[string]any{"status": map[string]any{"conditions": conditions("NodeHealthy", "True")}})
+		m.SetLabels(map[string]string{"cluster.x-k8s.io/cluster-name": "mgmt"})
+		if err := k.Create(ctx, m); err != nil {
+			return err
+		}
+		k.w.management = k.w.breakGlass
+	}
+	return nil
 }
 
 func TestRecoverDatastore(t *testing.T) {
@@ -176,17 +245,37 @@ func (m movingMover) Move(ctx context.Context, from, to []byte, ns string, dryRu
 	if err := src.Get(ctx, ctrlclient.ObjectKey{Namespace: ns, Name: "mgmt"}, cl); err != nil {
 		return err
 	}
-	moved := cl.DeepCopy()
-	moved.SetResourceVersion("")
-	_ = unstructured.SetNestedField(moved.Object, false, "spec", "paused")
-	// What a move that stopped halfway already copied, it updates.
-	if err := dst.Delete(ctx, moved); err != nil && !apierrors.IsNotFound(err) {
-		return err
+	objs := []*unstructured.Unstructured{cl}
+	for _, gvk := range []schema.GroupVersionKind{breakglass.K0sControlPlaneGVK, machineListGVK.GroupVersion().WithKind("Machine")} {
+		list := &unstructured.UnstructuredList{}
+		list.SetGroupVersionKind(gvk)
+		if err := src.List(ctx, list, ctrlclient.InNamespace(ns)); err != nil {
+			return err
+		}
+		for i := range list.Items {
+			objs = append(objs, &list.Items[i])
+		}
 	}
-	if err := dst.Create(ctx, moved); err != nil {
-		return err
+	for _, o := range objs {
+		moved := o.DeepCopy()
+		moved.SetResourceVersion("")
+		if o == cl {
+			_ = unstructured.SetNestedField(moved.Object, false, "spec", "paused")
+		}
+		// What a move that stopped halfway already copied, it updates.
+		if err := dst.Delete(ctx, moved); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+		if err := dst.Create(ctx, moved); err != nil {
+			return err
+		}
 	}
-	return src.Delete(ctx, cl)
+	for _, o := range objs {
+		if err := src.Delete(ctx, o); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (w *world) recoverPhases(t *testing.T, extra ...string) []phase.Phase {
@@ -208,17 +297,20 @@ func (w *world) recoverPhases(t *testing.T, extra ...string) []phase.Phase {
 	}
 	if w.installed == nil {
 		stamped := installedFor(providers.FromConfig(&cfg.Providers))
-		w.installed = map[string][]providers.Installed{bootstrapKC: stamped, breakGlassKC: stamped}
+		w.installed = map[string][]providers.Installed{bootstrapKC: stamped, breakGlassKC: stamped, managementKC_: stamped}
 	}
 	return RecoverPhases(cfg, Deps{
-		Docker:            w.docker,
-		NodesReady:        func(context.Context, []byte) (bool, error) { return true, nil },
-		Providers:         fakeSides{w},
-		Mover:             movingMover{w},
-		Clients:           w.clients,
-		Lookup:            func(k string) (string, bool) { v, ok := w.env[k]; return v, ok },
-		Now:               time.Now,
-		BreakGlassTimeout: time.Second,
+		Docker:              w.docker,
+		NodesReady:          func(context.Context, []byte) (bool, error) { return true, nil },
+		Providers:           fakeSides{w},
+		Mover:               movingMover{w},
+		Clients:             w.clients,
+		Lookup:              func(k string) (string, bool) { v, ok := w.env[k]; return v, ok },
+		Now:                 w.now,
+		BreakGlassTimeout:   time.Second,
+		ClusterReadyTimeout: 10 * time.Millisecond,
+		MachinesTimeout:     10 * time.Millisecond,
+		ChildrenTimeout:     10 * time.Millisecond,
 		Revision: func(_ context.Context, ds string) (int64, error) {
 			w.dataSource = ds
 			w.revision += w.writes
@@ -237,8 +329,24 @@ gitops:
 func TestRecover(t *testing.T) {
 	w := down(t)
 	ctx := t.Context()
+	// The Management cluster is Available from now on: the stable window starts.
+	cl := &unstructured.Unstructured{}
+	cl.SetGroupVersionKind(clusterGVK)
+	if err := w.breakGlass.Get(ctx, ctrlclient.ObjectKey{Namespace: "mgmt", Name: "mgmt"}, cl); err != nil {
+		t.Fatal(err)
+	}
+	conds := conditions("ControlPlaneAvailable", "True", "Available", "True", "RemoteConnectionProbe", "True")
+	for _, c := range conds {
+		c.(map[string]any)["lastTransitionTime"] = time.Now().Format(time.RFC3339)
+	}
+	_ = unstructured.SetNestedSlice(cl.Object, conds, "status", "conditions")
+	if err := w.breakGlass.Update(ctx, cl); err != nil {
+		t.Fatal(err)
+	}
 	var out bytes.Buffer
-	if err := phase.Run(ctx, w.recoverPhases(t, fluxYAML), "", &out); err != nil {
+	err := phase.Run(ctx, w.recoverPhases(t, fluxYAML), "", &out)
+	var checkpoint *phase.CheckpointError
+	if !errors.As(err, &checkpoint) || checkpoint.Phase != "delete-bootstrap-cluster" {
 		t.Fatalf("%v\n%s", err, out.String())
 	}
 
@@ -283,55 +391,172 @@ func TestRecover(t *testing.T) {
 	if list.Kind != "List" || !slices.Equal(names, []string{"MutatingWebhookConfiguration/capi-mutating", "ValidatingWebhookConfiguration/capi-validating"}) {
 		t.Errorf("saved %s %v", list.Kind, names)
 	}
-	vwc := &admissionv1.ValidatingWebhookConfigurationList{}
-	_ = w.breakGlass.List(ctx, vwc)
-	if len(vwc.Items) != 1 || vwc.Items[0].Name != "someone-elses" {
-		t.Errorf("left on the datastore: %v", vwc.Items)
+	if names, _, _ := recordedMachines(ctx, w.bootstrap); !slices.Equal(names, []string{"mgmt-old-1", "mgmt-old-2"}) {
+		t.Errorf("recorded the old Machines %v", names)
 	}
 
-	// Flux suspended, the child paused and marked, the operator's own left alone.
+	// The old Machines were deleted without drain, volume wait or k0smotron's hook;
+	// the new ones came up on the datastore, which is the Management cluster again.
+	if len(w.deleted) != 2 {
+		t.Fatalf("deleted %v", w.deleted)
+	}
+	for _, d := range w.deleted {
+		if !strings.Contains(d, excludeDraining+":true") || !strings.Contains(d, excludeVolumeDetach+":true") || strings.Contains(d, "kcp-cleanup") {
+			t.Errorf("deleted %s", d)
+		}
+	}
+	mgmt := w.breakGlass
+	if !slices.Equal(w.moves, []string{"dry-run", "move", "dry-run", "move"}) {
+		t.Errorf("moves %v", w.moves)
+	}
+	machines, _ := clusterMachines(ctx, mgmt, &config.ManagementCluster{Cluster: config.Cluster{Namespace: "mgmt", Name: "mgmt"}})
+	if !slices.Equal(machines, []string{"mgmt-new-1", "mgmt-new-2"}) {
+		t.Errorf("the Management cluster's Machines: %v", machines)
+	}
+
+	// The finish: the webhooks back, the leftovers gone, Flux resumed, the child
+	// unpaused; the operator's own left alone.
+	vwc := &admissionv1.ValidatingWebhookConfigurationList{}
+	_ = mgmt.List(ctx, vwc)
+	mwc := &admissionv1.MutatingWebhookConfigurationList{}
+	_ = mgmt.List(ctx, mwc)
+	if len(vwc.Items) != 2 || len(mwc.Items) != 1 {
+		t.Errorf("webhooks: %d validating, %d mutating", len(vwc.Items), len(mwc.Items))
+	}
+	leases := &coordinationv1.LeaseList{}
+	_ = mgmt.List(ctx, leases)
+	if len(leases.Items) != 1 || leases.Items[0].Name != "someone-elses" {
+		t.Errorf("leases left: %v", leases.Items)
+	}
+	cns := &unstructured.UnstructuredList{}
+	cns.SetGroupVersionKind(controlNodeGVK)
+	_ = mgmt.List(ctx, cns)
+	if len(cns.Items) != 0 {
+		t.Errorf("%d ControlNodes left", len(cns.Items))
+	}
 	k := &unstructured.Unstructured{}
 	k.SetGroupVersionKind(flux.KustomizationGVK)
-	_ = w.breakGlass.Get(ctx, ctrlclient.ObjectKey{Namespace: "flux-system", Name: "flux-system"}, k)
-	if s, _, _ := unstructured.NestedBool(k.Object, "spec", "suspend"); !s {
-		t.Error("Flux isn't suspended")
+	_ = mgmt.Get(ctx, ctrlclient.ObjectKey{Namespace: "flux-system", Name: "flux-system"}, k)
+	if s, _, _ := unstructured.NestedBool(k.Object, "spec", "suspend"); s || k.GetAnnotations()[flux.SuspendedAnnotation] != "" {
+		t.Error("Flux isn't resumed")
 	}
-	for name, want := range map[string]string{"child": "true", "kept": ""} {
+	for name, want := range map[string]bool{"child": false, "kept": true} {
 		cl := &unstructured.Unstructured{}
 		cl.SetGroupVersionKind(clusterGVK)
-		_ = w.breakGlass.Get(ctx, ctrlclient.ObjectKey{Namespace: "children", Name: name}, cl)
-		if p, _, _ := unstructured.NestedBool(cl.Object, "spec", "paused"); !p || cl.GetAnnotations()[PausedAnnotation] != want {
+		_ = mgmt.Get(ctx, ctrlclient.ObjectKey{Namespace: "children", Name: name}, cl)
+		if p, _, _ := unstructured.NestedBool(cl.Object, "spec", "paused"); p != want || cl.GetAnnotations()[PausedAnnotation] != "" {
 			t.Errorf("Cluster %s: paused %v, marker %q", name, p, cl.GetAnnotations()[PausedAnnotation])
 		}
 	}
-	nodes := &corev1.NodeList{}
-	_ = w.breakGlass.List(ctx, nodes)
-	if len(nodes.Items) != 0 {
-		t.Errorf("%d old Nodes left", len(nodes.Items))
+	// The Bootstrap cluster stays for the stable window; once it passed, the next run
+	// deletes it and does nothing else.
+	if _, ok := w.docker.containers["selfhostctl-mgmt-bootstrap"]; !ok {
+		t.Fatal("the Bootstrap cluster went before the stable window passed")
 	}
-
-	// Moved after a dry run, unpaused in the Bootstrap cluster.
-	if !slices.Equal(w.moves, []string{"dry-run", "move"}) {
-		t.Errorf("moves %v", w.moves)
-	}
-	cl := &unstructured.Unstructured{}
-	cl.SetGroupVersionKind(clusterGVK)
-	if err := w.bootstrap.Get(ctx, ctrlclient.ObjectKey{Namespace: "mgmt", Name: "mgmt"}, cl); err != nil {
-		t.Fatal(err)
-	}
-
-	// Again: everything is done, nothing runs.
+	w.clock = time.Now().Add(24 * time.Hour)
 	out.Reset()
 	if err := phase.Run(ctx, w.recoverPhases(t, fluxYAML), "", &out); err != nil {
 		t.Fatalf("second run: %v\n%s", err, out.String())
 	}
-	if strings.Contains(out.String(), "running") || len(w.moves) != 2 || len(w.docker.created) != 1 {
-		t.Errorf("second run did something:\n%s", out.String())
+	if strings.Count(out.String(), "running") != 1 || !strings.Contains(out.String(), "delete-bootstrap-cluster: running") {
+		t.Errorf("second run:\n%s", out.String())
 	}
-	for _, want := range []string{"outage: done (a Recovery is in progress)", "break-glass: done (moved)", "webhooks: done (moved)"} {
-		if !strings.Contains(out.String(), want) {
-			t.Errorf("second run lacks %q:\n%s", want, out.String())
+	if _, ok := w.docker.containers["selfhostctl-mgmt-bootstrap"]; ok {
+		t.Error("the Bootstrap cluster is still there")
+	}
+
+	// Then there is nothing to recover.
+	err = phase.Run(ctx, w.recoverPhases(t, fluxYAML), "", &out)
+	if !phase.IsStop(err) || !strings.Contains(err.Error(), "outage: blocked: the Management cluster answers: nothing to recover") {
+		t.Errorf("third run: %v", err)
+	}
+}
+
+// The finish order is fixed: the webhooks before anything reconciles again, Flux
+// before the children, the Bootstrap cluster last.
+func TestRecoverPhaseOrder(t *testing.T) {
+	var names []string
+	for _, p := range down(t).recoverPhases(t) {
+		names = append(names, p.Name())
+	}
+	want := []string{"outage", "datastore", "bootstrap-cluster", "host", "providers", "before-apply",
+		"break-glass", "webhooks", "suspend-gitops", "pause-children", "delete-nodes", "move-to-bootstrap", "delete-break-glass",
+		"infrastructure", "replace-machines", "ready", "move-to-management",
+		"restore-webhooks", "leftovers", "resume-gitops", "unpause-children", "delete-bootstrap-cluster"}
+	if !slices.Equal(names, want) {
+		t.Errorf("phases %v", names)
+	}
+}
+
+// A child stays paused until its API answers with its Nodes Ready; a later run
+// unpauses it.
+func TestRecoverUnpausesAChildOnceItAnswers(t *testing.T) {
+	w := down(t)
+	child := w.child
+	w.child = nil
+	ctx := t.Context()
+	var out bytes.Buffer
+	err := phase.Run(ctx, w.recoverPhases(t, fluxYAML), "", &out)
+	if !phase.IsStop(err) || !strings.Contains(err.Error(), "unpause-children: blocked") || !strings.Contains(err.Error(), "Cluster children/child: its API doesn't answer") {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	paused := func() (bool, string) {
+		cl := &unstructured.Unstructured{}
+		cl.SetGroupVersionKind(clusterGVK)
+		_ = w.breakGlass.Get(ctx, ctrlclient.ObjectKey{Namespace: "children", Name: "child"}, cl)
+		p, _, _ := unstructured.NestedBool(cl.Object, "spec", "paused")
+		return p, cl.GetAnnotations()[PausedAnnotation]
+	}
+	if p, marker := paused(); !p || marker != "true" {
+		t.Errorf("the child: paused %v, marker %q", p, marker)
+	}
+
+	w.child = child
+	out.Reset()
+	_ = phase.Run(ctx, w.recoverPhases(t, fluxYAML), "", &out)
+	if p, marker := paused(); p || marker != "" {
+		t.Errorf("the child, answering: paused %v, marker %q\n%s", p, marker, out.String())
+	}
+}
+
+// recover removes only k0smotron's hook: another blocks, before any Machine goes,
+// until the operator removes it.
+func TestRecoverBlocksOnAnotherLifecycleHook(t *testing.T) {
+	w := down(t)
+	ctx := t.Context()
+	const hook = preDrainHookPrefix + "/someone"
+	setHook := func(c ctrlclient.Client, on bool) {
+		m := &unstructured.Unstructured{}
+		m.SetGroupVersionKind(machineListGVK.GroupVersion().WithKind("Machine"))
+		if err := c.Get(ctx, ctrlclient.ObjectKey{Namespace: "mgmt", Name: "mgmt-old-2"}, m); err != nil {
+			t.Fatal(err)
 		}
+		ann := m.GetAnnotations()
+		if on {
+			ann[hook] = ""
+		} else {
+			delete(ann, hook)
+		}
+		m.SetAnnotations(ann)
+		if err := c.Update(ctx, m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setHook(w.breakGlass, true)
+	var out bytes.Buffer
+	err := phase.Run(ctx, w.recoverPhases(t, fluxYAML), "", &out)
+	if !phase.IsStop(err) || !strings.Contains(err.Error(), "replace-machines: blocked: old Machines carry lifecycle hooks recover doesn't know (Machine mgmt-old-2: "+hook+")") {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if len(w.deleted) != 0 {
+		t.Errorf("deleted %v", w.deleted)
+	}
+
+	setHook(w.bootstrap, false)
+	out.Reset()
+	_ = phase.Run(ctx, w.recoverPhases(t, fluxYAML), "", &out)
+	if len(w.deleted) != 2 {
+		t.Errorf("after the operator removed it, deleted %v\n%s", w.deleted, out.String())
 	}
 }
 

@@ -43,6 +43,7 @@ func newFake(objs ...ctrlclient.Object) ctrlclient.Client {
 		flux.KustomizationGVK, flux.HelmReleaseGVK, flux.FluxInstanceGVK, gitRepositoryGVK} {
 		mapper.Add(gvk, meta.RESTScopeNamespace)
 	}
+	mapper.Add(controlNodeGVK, meta.RESTScopeRoot)
 	return fake.NewClientBuilder().WithScheme(scheme).WithRESTMapper(mapper).WithObjects(objs...).Build()
 }
 
@@ -63,6 +64,19 @@ type world struct {
 	// dataSource is what was read.
 	writes, revision int64
 	dataSource       string
+	// child is the Child cluster's API; nil: it doesn't answer.
+	child ctrlclient.Client
+	// deleted are the old Machines deleted, with their annotations then.
+	deleted []string
+	// clock is now, when set.
+	clock time.Time
+}
+
+func (w *world) now() time.Time {
+	if w.clock.IsZero() {
+		return time.Now()
+	}
+	return w.clock
 }
 
 func (w *world) clients(kc []byte) (ctrlclient.Client, error) {
@@ -80,6 +94,11 @@ func (w *world) clients(kc []byte) (ctrlclient.Client, error) {
 			return nil, errors.New("connection refused")
 		}
 		return w.management, nil
+	case childKC:
+		if w.child == nil {
+			return nil, errors.New("connection refused")
+		}
+		return w.child, nil
 	case breakGlassKC:
 		if w.breakGlass == nil {
 			return nil, errors.New("connection refused")

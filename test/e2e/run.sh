@@ -14,8 +14,12 @@
 #      recover stops at the datastore, which a live cluster writes to, and has
 #      started nothing;
 #   9. every machine container removed (the datastore survives): recover runs a
-#      Break-glass controller against the datastore and moves the objects into a new
-#      Bootstrap cluster; again, it runs nothing, and bootstrap is blocked meanwhile.
+#      Break-glass controller against the datastore, moves the objects into a new
+#      Bootstrap cluster, replaces the machines, moves them back and finishes;
+#      bootstrap is blocked meanwhile, and the Bootstrap cluster goes after the
+#      stable window;
+#  10. the Management cluster manages itself again: nothing suspended or paused,
+#      recover finds nothing to recover, and a deleted Machine is replaced.
 #
 # Flux comes from the cluster's own definition. Step 3's gitops phase gives it its
 # credential; Flux then syncs a ConfigMap from a git server in a container, and
@@ -224,22 +228,52 @@ run() {
   for c in $(machine_containers); do docker rm -f -v "$c" >/dev/null; done
   [[ -z $(machine_containers) ]] || die "machines left"
   ! k get --raw /readyz >/dev/null 2>&1 || die "the Management cluster's API still answers"
-  "$BIN" recover -f "$CFG"
-  ! docker container inspect "$BG" >/dev/null 2>&1 || die "the Break-glass controller is still there"
-  kb -n mgmt get cluster mgmt >/dev/null || die "the Cluster isn't in the Bootstrap cluster"
-  kb -n mgmt get k0scontrolplanes,machines
-  # Not piped into grep -q: with pipefail, grep stopping at the first match fails the pipe.
-  local hooks
-  hooks=$(kb -n kube-system get configmap selfhostctl-recovery-webhooks -o jsonpath='{.data.webhooks\.json}')
-  grep -q '"kind": "ValidatingWebhookConfiguration"' <<<"$hooks" \
-    || { printf '%.3000s\n' "$hooks"; die "the providers' webhooks weren't saved"; }
-  out=$("$BIN" recover -f "$CFG")
-  echo "$out"
-  ! grep -q running <<<"$out" || die "a second recover ran a phase"
+  # It stops at the stable window's checkpoint (4) until the Bootstrap cluster may go.
+  local checked=""
+  for i in $(seq 30); do
+    code=0
+    "$BIN" recover -f "$CFG" || code=$?
+    [[ $code == 0 ]] && break
+    [[ $code == 4 ]] || die "recover exited $code"
+    if [[ -z $checked ]]; then
+      checked=1
+      ! docker container inspect "$BG" >/dev/null 2>&1 || die "the Break-glass controller is still there"
+      # Not piped into grep -q: with pipefail, grep stopping at the first match fails the pipe.
+      local hooks
+      hooks=$(kb -n kube-system get configmap selfhostctl-recovery-webhooks -o jsonpath='{.data.webhooks\.json}')
+      grep -q '"kind": "ValidatingWebhookConfiguration"' <<<"$hooks" \
+        || { printf '%.3000s\n' "$hooks"; die "the providers' webhooks weren't saved"; }
+      out=$("$BIN" status -f "$CFG")
+      echo "$out"
+      grep -q '^location: management, a Recovery is in progress$' <<<"$out" || die "status doesn't show the Recovery"
+      expect 3 "$BIN" bootstrap -f "$CFG"
+    fi
+    ((i < 30)) || die "the Bootstrap cluster was never deleted"
+    sleep 15
+  done
+  [[ -n $checked ]] || die "recover never stopped at the stable window"
+  ! bootstrap_exists || die "the Bootstrap cluster is still there"
+
+  log "10. self-managed again: nothing suspended or paused, and it replaces a Machine itself"
+  k get nodes -o wide
+  k -n mgmt get k0scontrolplanes,machines
+  k get validatingwebhookconfigurations -l cluster.x-k8s.io/provider -o name | grep . >/dev/null || die "the webhooks weren't restored"
   out=$("$BIN" status -f "$CFG")
   echo "$out"
-  grep -q '^location: bootstrap, a Recovery is in progress$' <<<"$out" || die "status doesn't show the Recovery"
-  expect 3 "$BIN" bootstrap -f "$CFG"
+  grep -q '^location: management$' <<<"$out" || die "status doesn't say management"
+  ! grep -q '^warning:' <<<"$out" || die "status warns after the Recovery"
+  expect 3 "$BIN" recover -f "$CFG"
+  local gone
+  gone=$(k -n mgmt get machines.cluster.x-k8s.io -o jsonpath='{.items[0].metadata.name}')
+  k -n mgmt delete machine.cluster.x-k8s.io "$gone" --wait=false
+  for i in $(seq 60); do
+    names=$(k -n mgmt get machines.cluster.x-k8s.io -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)
+    ready=$(k -n mgmt get k0scontrolplane mgmt -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)
+    [[ $ready == 2 && $(wc -w <<<"$names") == 2 && " $names " != *" $gone "* ]] && break
+    ((i < 60)) || die "the Management cluster didn't replace Machine $gone"
+    sleep 10
+  done
+  k -n mgmt wait machines.cluster.x-k8s.io --all --for=condition=NodeHealthy --timeout=10m
 
   log "E2E PASSED"
 }

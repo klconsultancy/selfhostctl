@@ -390,6 +390,21 @@ func Suspended(ctx context.Context, c ctrlclient.Client) ([]Ref, error) {
 	return refs, nil
 }
 
+// Marked lists what Suspend suspended and Resume would resume, the root last.
+func Marked(ctx context.Context, c ctrlclient.Client, root config.ObjectRef) ([]Ref, error) {
+	objs, err := ordered(ctx, c, root)
+	if err != nil {
+		return nil, err
+	}
+	var refs []Ref
+	for i := len(objs) - 1; i >= 0; i-- {
+		if objs[i].GetAnnotations()[SuspendedAnnotation] != "" {
+			refs = append(refs, refOf(objs[i]))
+		}
+	}
+	return refs, nil
+}
+
 // Unsuspended lists every Kustomization and HelmRelease Suspend would still suspend.
 func Unsuspended(ctx context.Context, c ctrlclient.Client) ([]Ref, error) {
 	objs, err := ordered(ctx, c, config.ObjectRef{})

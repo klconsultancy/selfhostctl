@@ -20,6 +20,10 @@ _Avoid_: kind cluster, ephemeral cluster, seed cluster
 A temporary control-plane process, run against the Management cluster's surviving datastore with its PKI, that serves the cluster's objects when no machine of it is left. It runs no workloads and exists only during a recovery.
 _Avoid_: rescue node, temporary controller, emergency API
 
+**Infrastructure adapter**:
+What a Recovery asks of the infrastructure the Management cluster's machines ran on, before it replaces them. The default asks nothing.
+_Avoid_: infrastructure provider (that is Cluster API's), plugin, driver
+
 ## Lifecycle
 
 **Phase**:

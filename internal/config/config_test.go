@@ -79,6 +79,11 @@ func TestParseRejects(t *testing.T) {
 			want: []string{"set CLUSTER_TOPOLOGY through providers.clusterTopology"},
 		},
 		{
+			name: "an unknown Infrastructure adapter",
+			yaml: valid + "infrastructure: {adapter: capmox}\n",
+			want: []string{`infrastructure.adapter: "capmox": the adapters are none`},
+		},
+		{
 			name: "gitops without flux",
 			yaml: valid + "gitops: {}\n",
 			want: []string{"gitops.flux: required"},
