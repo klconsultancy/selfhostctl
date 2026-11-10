@@ -141,17 +141,18 @@ Agreed 2026-11-09, for #11 and #12. Profile `k0smotron-kine`.
 | a Recovery is in progress | done |
 | anything else, e.g. the Management cluster answers | blocked: nothing to recover |
 
-**Phases (#11):** `outage`, `bootstrap-cluster`, `host`, `providers`, `before-apply`, `break-glass`, `leases`, `webhooks`, `suspend-gitops`, `pause-children`, `delete-nodes`, `move-to-bootstrap`, `delete-break-glass`. Every phase from `break-glass` to `delete-nodes` is done ("moved") once the Bootstrap cluster holds the objects.
+**Phases (#11):** `outage`, `datastore`, `bootstrap-cluster`, `host`, `providers`, `before-apply`, `break-glass`, `webhooks`, `suspend-gitops`, `pause-children`, `delete-nodes`, `move-to-bootstrap`, `delete-break-glass`. Every phase from `break-glass` to `delete-nodes` is done ("moved") once the Bootstrap cluster holds the objects.
 
-**Proof of the outage** (`leases`, before anything changes in the datastore). `outage` only sees that the API doesn't answer from here; a cut-off VPN or API proxy looks the same, and the steps after it would then change a live cluster.
+**Proof of the outage** (`datastore`, before anything starts on the datastore). `outage` only sees that the API doesn't answer from here; a cut-off VPN or API proxy looks the same. The Break-glass controller would then run next to a live cluster, and every later step changes it.
 
 | | Choice |
 | --- | --- |
-| Evidence | the datastore itself: every live kube-apiserver renews its identity lease (`kube-system`, label `apiserver.kubernetes.io/identity`), every k0s controller and kubelet its lease in `kube-node-lease`, about every 10 s |
-| Gate | blocked while any lease but the Break-glass controller's own (by hostname, `k0s-ctrl-<container>`) was renewed within 2 minutes: "the datastore shows a live cluster" |
-| Clock | compared with the Break-glass controller's own renewal, not the operator's clock |
-| Cost | the Break-glass controller runs against the datastore before the proof; it writes only its own leases and registration there |
-| Not chosen | a confirmation flag per run (only the operator's belief); an infrastructure check (not generic; an Infrastructure adapter may add one, #13) |
+| Evidence | the datastore itself: a live cluster writes to it every few seconds (API servers, controllers and kubelets renew their leases) |
+| Gate | kine's revision (`MAX(id)` of table `kine`) read twice, 60 s apart, from the operator's host; grown → blocked: "the datastore shows a live cluster" |
+| Clock | none: revisions, not timestamps |
+| Datastore | Postgres only (`postgres://`, `postgresql://`); another one → the phase fails. Read with the same data source as the Break-glass controller, so it must resolve from the operator's host too |
+| Once started | done while a Recovery is in progress: the Break-glass controller writes to it itself |
+| Not chosen | the leases, read through the Break-glass controller (it runs on a live datastore before the proof); a confirmation flag per run, or the operator's monitoring alone (both see from the operator's side of a cut-off); an infrastructure check (not generic; an Infrastructure adapter may add one, #13) |
 
 | Decision | Choice |
 | --- | --- |

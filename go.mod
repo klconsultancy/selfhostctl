@@ -5,6 +5,7 @@ go 1.27
 require (
 	github.com/containerd/errdefs v1.0.0
 	github.com/go-logr/logr v1.4.4
+	github.com/lib/pq v1.12.3
 	github.com/moby/moby/api v1.56.1
 	github.com/moby/moby/client v0.6.2
 	github.com/spf13/cobra v1.10.2
@@ -90,7 +91,6 @@ require (
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/lann/builder v0.0.0-20180802200727-47ae307949d0 // indirect
 	github.com/lann/ps v0.0.0-20150810152359-62de8c46ede0 // indirect
-	github.com/lib/pq v1.12.3 // indirect
 	github.com/liggitt/tabwriter v0.0.0-20181228230101-89fcab3d43de // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect

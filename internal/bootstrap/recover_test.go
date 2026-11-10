@@ -12,7 +12,6 @@ import (
 	"time"
 
 	admissionv1 "k8s.io/api/admissionregistration/v1"
-	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -88,92 +87,71 @@ func down(t *testing.T) *world {
 	}
 	root := obj(flux.KustomizationGVK, "flux-system", map[string]any{"spec": map[string]any{}})
 	root.SetNamespace("flux-system")
-	now := time.Now()
 	return &world{
 		docker:     running(t),
 		bootstrap:  newFake(),
 		kubeconfig: kubeconfigFile(t),
 		breakGlass: newFake(theCluster(false), kcp, child, own, root,
-			// The Break-glass controller's own leases, just renewed; the dead machine's,
-			// silent for ten minutes.
-			apiserverLease("apiserver-bg", "selfhostctl-mgmt-break-glass", now),
-			nodeLease("k0s-ctrl-selfhostctl-mgmt-break-glass", now),
-			apiserverLease("apiserver-old", "mgmt-cp-1", now.Add(-10*time.Minute)),
-			nodeLease("mgmt-cp-1", now.Add(-10*time.Minute)),
 			hook("validating", "capi-validating", true), hook("mutating", "capi-mutating", true), hook("validating", "someone-elses", false),
 			&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "mgmt-old-1"}}, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "mgmt-old-2"}}),
 		env: recoveryEnv,
 	}
 }
 
-func apiserverLease(name, host string, renewed time.Time) *coordinationv1.Lease {
-	t := metav1.NewMicroTime(renewed)
-	return &coordinationv1.Lease{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "kube-system", Name: name, Labels: map[string]string{
-			apiserverIdentity: "kube-apiserver", "kubernetes.io/hostname": host}},
-		Spec: coordinationv1.LeaseSpec{RenewTime: &t},
-	}
-}
-
-func nodeLease(name string, renewed time.Time) *coordinationv1.Lease {
-	t := metav1.NewMicroTime(renewed)
-	return &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Namespace: "kube-node-lease", Name: name}, Spec: coordinationv1.LeaseSpec{RenewTime: &t}}
-}
-
-func TestRecoverLeases(t *testing.T) {
+func TestRecoverDatastore(t *testing.T) {
 	tests := []struct {
-		name  string
-		edit  func(t *testing.T, c ctrlclient.Client)
-		state phase.State
-		why   string
+		name       string
+		writes     int64
+		breakGlass bool
+		state      phase.State
+		why        string
 	}{
-		{"every other lease silent", func(*testing.T, ctrlclient.Client) {}, phase.Done, "no other API server"},
-		{"another API server renews its lease", func(t *testing.T, c ctrlclient.Client) {
-			if err := c.Create(t.Context(), apiserverLease("apiserver-live", "mgmt-cp-2", time.Now().Add(-20*time.Second))); err != nil {
-				t.Fatal(err)
-			}
-		}, phase.Blocked, "API server mgmt-cp-2 (20s ago)"},
-		{"a kubelet renews its lease", func(t *testing.T, c ctrlclient.Client) {
-			if err := c.Create(t.Context(), nodeLease("worker-1", time.Now().Add(-5*time.Second))); err != nil {
-				t.Fatal(err)
-			}
-		}, phase.Blocked, "Lease kube-node-lease/worker-1"},
-		{"the Break-glass controller's own isn't there yet", func(t *testing.T, c ctrlclient.Client) {
-			if err := c.Delete(t.Context(), apiserverLease("apiserver-bg", "", time.Time{})); err != nil {
-				t.Fatal(err)
-			}
-		}, phase.Next, "its own lease"},
+		{"nothing writes to it", 0, false, phase.Done, "nothing wrote to it"},
+		{"something writes to it", 3, false, phase.Blocked, "the datastore shows a live cluster: 3 writes"},
+		// The Break-glass controller writes to it itself: it isn't watched again.
+		{"the Break-glass controller runs on it", 3, true, phase.Done, "already ran on it"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			w := down(t)
-			w.docker.containers["selfhostctl-mgmt-break-glass"] = &fakeContainer{running: true}
-			tt.edit(t, w.breakGlass)
-			st := states(t, w.recoverPhases(t))["leases"]
-			if st.State != tt.state || !strings.Contains(st.Reason, tt.why) {
-				t.Errorf("leases: %v %q, want %v %q", st.State, st.Reason, tt.state, tt.why)
+			w.writes = tt.writes
+			if tt.breakGlass {
+				w.docker.containers["selfhostctl-mgmt-break-glass"] = &fakeContainer{running: true}
+			}
+			var ds phase.Phase
+			for _, p := range w.recoverPhases(t) {
+				if p.Name() == "datastore" {
+					ds = p
+				}
+			}
+			if st, err := ds.Status(t.Context()); err != nil || st.State != phase.Next && !tt.breakGlass {
+				t.Fatalf("before watching: %v %v", st, err)
+			}
+			if err := ds.Run(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			st, err := ds.Status(t.Context())
+			if err != nil || st.State != tt.state || !strings.Contains(st.Reason, tt.why) {
+				t.Errorf("datastore: %v %q (%v), want %v %q", st.State, st.Reason, err, tt.state, tt.why)
 			}
 		})
 	}
 }
 
-// A live cluster stops the Recovery before it changes anything in the datastore.
+// A live cluster stops the Recovery before anything starts on its datastore.
 func TestRecoverStopsAtALiveCluster(t *testing.T) {
 	w := down(t)
-	if err := w.breakGlass.Create(t.Context(), apiserverLease("apiserver-live", "mgmt-cp-2", time.Now())); err != nil {
-		t.Fatal(err)
-	}
+	w.writes = 1
 	var out bytes.Buffer
 	err := phase.Run(t.Context(), w.recoverPhases(t, fluxYAML), "", &out)
-	if !phase.IsStop(err) || !strings.Contains(err.Error(), "leases: blocked: the datastore shows a live cluster") {
+	if !phase.IsStop(err) || !strings.Contains(err.Error(), "datastore: blocked: the datastore shows a live cluster") {
 		t.Fatalf("err %v\n%s", err, out.String())
 	}
-	vwc := &admissionv1.ValidatingWebhookConfigurationList{}
-	_ = w.breakGlass.List(t.Context(), vwc)
-	nodes := &corev1.NodeList{}
-	_ = w.breakGlass.List(t.Context(), nodes)
-	if len(vwc.Items) != 2 || len(nodes.Items) != 2 || len(w.moves) != 0 {
-		t.Errorf("changed the datastore: %d webhooks, %d Nodes, moves %v", len(vwc.Items), len(nodes.Items), w.moves)
+	if len(w.docker.created) != 0 || w.docker.containers["selfhostctl-mgmt-break-glass"] != nil {
+		t.Errorf("started something: created %v", w.docker.created)
+	}
+	if w.dataSource != "postgres://from-the-environment" {
+		t.Errorf("watched %q", w.dataSource)
 	}
 }
 
@@ -241,6 +219,12 @@ func (w *world) recoverPhases(t *testing.T, extra ...string) []phase.Phase {
 		Lookup:            func(k string) (string, bool) { v, ok := w.env[k]; return v, ok },
 		Now:               time.Now,
 		BreakGlassTimeout: time.Second,
+		Revision: func(_ context.Context, ds string) (int64, error) {
+			w.dataSource = ds
+			w.revision += w.writes
+			return w.revision, nil
+		},
+		DatastoreQuiet: time.Millisecond,
 	})
 }
 

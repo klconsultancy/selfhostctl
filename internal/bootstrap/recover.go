@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/moby/moby/client"
-	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -95,12 +94,12 @@ func RecoverPhases(cfg *config.ManagementCluster, deps Deps) []phase.Phase {
 	bg := breakGlassPhase{cfg: cfg, loc: loc, docker: deps.Docker, clients: deps.Clients, lookup: deps.Lookup, timeout: deps.BreakGlassTimeout}
 	phases := []phase.Phase{
 		&outagePhase{cfg: cfg, loc: loc},
+		&datastorePhase{cfg: cfg, loc: loc, lookup: deps.Lookup, revision: deps.Revision, quiet: deps.DatastoreQuiet},
 		newBootstrapClusterPhase(cfg, deps),
 		&hostPhase{cluster: cluster, docker: deps.Docker},
 		newProvidersPhase(cfg, deps),
 		newBeforeApplyPhase(cfg, deps),
 		beforeMove{&bg, loc},
-		beforeMove{&leasesPhase{cfg: cfg, loc: loc, clients: deps.Clients, timeout: deps.BreakGlassTimeout}, loc},
 		beforeMove{&webhooksPhase{loc: loc, clients: deps.Clients}, loc},
 		beforeMove{&suspendPhase{tool: gitops.For(cfg.GitOps), loc: loc, clients: deps.Clients}, loc},
 		beforeMove{&pauseChildrenPhase{cfg: cfg, loc: loc, clients: deps.Clients}, loc},
@@ -466,140 +465,68 @@ func (p *breakGlassPhase) wait(ctx context.Context, bg *k0scontainer.Cluster) ([
 	}
 }
 
-// --- leases ---
+// --- datastore ---
 
-// leaseQuiet is how long every other API server and node must have been silent: a
-// live one renews its lease about every 10 seconds.
-const leaseQuiet = 2 * time.Minute
-
-// leasesPhase is the proof of the outage from the datastore itself, before anything
-// changes there: no API server, k0s controller or kubelet but the Break-glass
-// controller's still renews its lease. A cluster only cut off from the operator (a VPN,
-// an API proxy) still does.
-type leasesPhase struct {
-	cfg     *config.ManagementCluster
-	loc     *locator
-	clients Clients
-	timeout time.Duration
+// datastorePhase is the proof of the outage from the datastore itself, before
+// anything starts on it: nothing writes to it. A cluster only cut off from the
+// operator (a VPN, an API proxy) still does, every few seconds.
+type datastorePhase struct {
+	cfg      *config.ManagementCluster
+	loc      *locator
+	lookup   func(string) (string, bool)
+	revision func(ctx context.Context, dataSource string) (int64, error)
+	quiet    time.Duration
+	// watched is set once Run watched it; writes is what it saw.
+	watched bool
+	writes  int64
 }
 
-func (p *leasesPhase) Name() string { return "leases" }
+func (p *datastorePhase) Name() string { return "datastore" }
 
-// apiserverIdentity labels kube-apiserver's identity leases.
-const apiserverIdentity = "apiserver.kubernetes.io/identity"
-
-// judge compares every other lease with the Break-glass controller's own: the same
-// clock that renewed it, not the operator's. ok is false while its own isn't there.
-func (p *leasesPhase) judge(ctx context.Context, c ctrlclient.Client) (live []string, ok bool, err error) {
-	own := BreakGlassName(p.cfg)
-	var ref time.Time
-	type renewed struct {
-		name string
-		at   time.Time
-	}
-	var others []renewed
-	apiservers := &coordinationv1.LeaseList{}
-	if err := c.List(ctx, apiservers, ctrlclient.InNamespace("kube-system"), ctrlclient.HasLabels{apiserverIdentity}); err != nil {
-		return nil, false, err
-	}
-	for _, l := range apiservers.Items {
-		at := renewTime(l)
-		if l.Labels["kubernetes.io/hostname"] == own {
-			if at.After(ref) {
-				ref = at
-			}
-			continue
-		}
-		others = append(others, renewed{"API server " + l.Labels["kubernetes.io/hostname"], at})
-	}
-	nodes := &coordinationv1.LeaseList{}
-	if err := c.List(ctx, nodes, ctrlclient.InNamespace("kube-node-lease")); err != nil {
-		return nil, false, err
-	}
-	for _, l := range nodes.Items {
-		if l.Name == "k0s-ctrl-"+own {
-			continue
-		}
-		others = append(others, renewed{"Lease kube-node-lease/" + l.Name, renewTime(l)})
-	}
-	if ref.IsZero() {
-		return nil, false, nil
-	}
-	for _, o := range others {
-		if ago := ref.Sub(o.at); ago < leaseQuiet {
-			live = append(live, fmt.Sprintf("%s (%s ago)", o.name, ago.Round(time.Second)))
-		}
-	}
-	return live, true, nil
-}
-
-func renewTime(l coordinationv1.Lease) time.Time {
-	if l.Spec.RenewTime != nil {
-		return l.Spec.RenewTime.Time
-	}
-	if l.Spec.AcquireTime != nil {
-		return l.Spec.AcquireTime.Time
-	}
-	return time.Time{}
-}
-
-func (p *leasesPhase) client(ctx context.Context) (ctrlclient.Client, *phase.Status, error) {
+func (p *datastorePhase) Status(ctx context.Context) (phase.Status, error) {
 	s, err := p.loc.get(ctx)
-	if err != nil {
-		return nil, nil, err
-	}
-	kc, blocked := breakGlassKubeconfig(s)
-	if blocked != nil {
-		return nil, blocked, nil
-	}
-	c, err := p.clients(kc)
-	return c, nil, err
-}
-
-func (p *leasesPhase) Status(ctx context.Context) (phase.Status, error) {
-	c, blocked, err := p.client(ctx)
-	if err != nil || blocked != nil {
-		return deref(blocked), err
-	}
-	live, ok, err := p.judge(ctx, c)
 	if err != nil {
 		return phase.Status{}, err
 	}
-	if !ok {
-		return phase.Status{State: phase.Next, Reason: "the Break-glass controller hasn't renewed its own lease yet"}, nil
+	if s.Recovering() {
+		return phase.Status{State: phase.Done, Reason: "the Break-glass controller already ran on it"}, nil
 	}
-	if len(live) > 0 {
+	if !p.watched {
+		return phase.Status{State: phase.Next, Reason: fmt.Sprintf("watches it for %s before anything starts on it", p.quiet)}, nil
+	}
+	if p.writes > 0 {
 		return phase.Status{State: phase.Blocked, Reason: fmt.Sprintf(
-			"the datastore shows a live cluster: %s renewed its lease within %s. Its API may only be cut off from here (a VPN, an API proxy): nothing in it was changed. "+
-				"If so, remove what recover started (docker rm -f -v %s %s). If its machines are really gone, run again in %s",
-			strings.Join(live, ", "), leaseQuiet, BreakGlassName(p.cfg), ContainerName(p.cfg), leaseQuiet)}, nil
+			"the datastore shows a live cluster: %d writes in %s. Its API may only be cut off from here (a VPN, an API proxy): nothing was started or changed. "+
+				"If its machines are really gone, find what still writes to the datastore",
+			p.writes, p.quiet)}, nil
 	}
-	return phase.Status{State: phase.Done, Reason: "no other API server or node renews its lease"}, nil
+	return phase.Status{State: phase.Done, Reason: fmt.Sprintf("nothing wrote to it in %s", p.quiet)}, nil
 }
 
-// Run waits for the Break-glass controller's own lease; Status then judges.
-func (p *leasesPhase) Run(ctx context.Context) error {
-	deadline := time.Now().Add(p.timeout)
-	for {
-		c, blocked, err := p.client(ctx)
-		if err != nil {
-			return err
-		}
-		if blocked != nil {
-			return errors.New(blocked.Reason)
-		}
-		if _, ok, err := p.judge(ctx, c); err != nil || ok {
-			return err
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("the Break-glass controller renewed no lease of its own in %s", p.timeout)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(2 * time.Second):
-		}
+// Run reads the revision twice, quiet apart; Status then judges.
+func (p *datastorePhase) Run(ctx context.Context) error {
+	s, err := RecoverySecrets(p.cfg, p.lookup)
+	if err != nil {
+		return err
 	}
+	if s.Datasource == "" {
+		return errors.New("recovery.kine names no datastore to watch")
+	}
+	before, err := p.revision(ctx, s.Datasource)
+	if err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(p.quiet):
+	}
+	after, err := p.revision(ctx, s.Datasource)
+	if err != nil {
+		return err
+	}
+	p.watched, p.writes = true, after-before
+	return nil
 }
 
 // --- webhooks ---

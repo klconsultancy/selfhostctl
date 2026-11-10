@@ -11,8 +11,8 @@
 #   6. without its kubeconfig, bootstrap refuses and creates no Bootstrap cluster;
 #   7. recover refuses while the Management cluster answers;
 #   8. a Management cluster only cut off from here (its kubeconfig points nowhere):
-#      recover stops at the leases, the datastore's proof that it lives, and has
-#      changed nothing in it;
+#      recover stops at the datastore, which a live cluster writes to, and has
+#      started nothing;
 #   9. every machine container removed (the datastore survives): recover runs a
 #      Break-glass controller against the datastore and moves the objects into a new
 #      Bootstrap cluster; again, it runs nothing, and bootstrap is blocked meanwhile.
@@ -127,7 +127,6 @@ run() {
 
   E2E_ENCRYPTION_KEY=$(head -c 32 /dev/urandom | base64)
   export E2E_ENCRYPTION_KEY
-  export E2E_KINE_DATASOURCE="postgres://kine:kine-e2e@$DB:5432/kine?sslmode=disable"
   unset E2E_RECOVERY_BUNDLE
 
   log "PostgreSQL for kine"
@@ -135,6 +134,10 @@ run() {
   docker run -d --name "$DB" --network kind -e POSTGRES_USER=kine -e POSTGRES_PASSWORD=kine-e2e \
     -e POSTGRES_DB=kine postgres:17.6 >/dev/null
   until docker exec "$DB" pg_isready -U kine >/dev/null 2>&1; do sleep 2; done
+  # By address, not by name: recover also reads it from this host, outside Docker's DNS.
+  local db_ip
+  db_ip=$(docker inspect -f '{{(index .NetworkSettings.Networks "kind").IPAddress}}' "$DB")
+  export E2E_KINE_DATASOURCE="postgres://kine:kine-e2e@$db_ip:5432/kine?sslmode=disable"
 
   log "a git server for Flux"
   git_server
@@ -204,34 +207,24 @@ run() {
   expect 3 "$BIN" recover -f "$CFG"
   ! bootstrap_exists || die "recover created a Bootstrap cluster next to a healthy Management cluster"
 
-  log "8. only cut off from here: recover stops at the leases, having changed nothing"
+  log "8. only cut off from here: recover stops at the datastore, having started nothing"
   cp "$KC" "$KC.real"
   sed -i.bak 's#server: https://.*#server: https://127.0.0.1:9#' "$KC"
   code=0
   out=$("$BIN" recover -f "$CFG" 2>&1) || code=$?
   echo "$out"
   [[ $code == 3 ]] || die "recover against a live, cut-off cluster exited $code, want 3"
-  grep -q 'leases: blocked: the datastore shows a live cluster' <<<"$out" || die "recover didn't stop at the leases"
+  grep -q 'datastore: blocked: the datastore shows a live cluster' <<<"$out" || die "recover didn't stop at the datastore"
   mv "$KC.real" "$KC"
-  k get validatingwebhookconfigurations -l cluster.x-k8s.io/provider -o name | grep -q . || die "the live cluster lost its webhooks"
-  [[ $(k get nodes -o name | wc -l) == 2 ]] || die "the live cluster lost Nodes"
-  docker rm -f -v "$BG" "$BOOT" >/dev/null
+  ! docker container inspect "$BG" >/dev/null 2>&1 || die "recover started a Break-glass controller on a live datastore"
+  ! bootstrap_exists || die "recover created a Bootstrap cluster next to a live Management cluster"
 
   log "9. every machine removed: recover, through the Break-glass controller"
   local c
   for c in $(machine_containers); do docker rm -f -v "$c" >/dev/null; done
   [[ -z $(machine_containers) ]] || die "machines left"
   ! k get --raw /readyz >/dev/null 2>&1 || die "the Management cluster's API still answers"
-  # The machines' leases may still be fresh: leases blocks for up to 2 minutes.
-  for i in $(seq 8); do
-    code=0
-    out=$("$BIN" recover -f "$CFG" 2>&1) || code=$?
-    echo "$out"
-    [[ $code == 0 ]] && break
-    { [[ $code == 3 ]] && grep -q 'leases: blocked' <<<"$out"; } || die "recover exited $code"
-    ((i < 8)) || die "the machines' leases never went quiet"
-    sleep 30
-  done
+  "$BIN" recover -f "$CFG"
   ! docker container inspect "$BG" >/dev/null 2>&1 || die "the Break-glass controller is still there"
   kb -n mgmt get cluster mgmt >/dev/null || die "the Cluster isn't in the Bootstrap cluster"
   kb -n mgmt get k0scontrolplanes,machines

@@ -59,6 +59,10 @@ type world struct {
 	refuse      bool              // the Management cluster answers Unauthorized
 	extraYAML   string            // appended to the config
 	env         map[string]string // the operator's environment
+	// The datastore: writes is how much each read of its revision finds it grew;
+	// dataSource is what was read.
+	writes, revision int64
+	dataSource       string
 }
 
 func (w *world) clients(kc []byte) (ctrlclient.Client, error) {

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/klconsultancy/selfhostctl/internal/config"
+	"github.com/klconsultancy/selfhostctl/internal/datastore"
 	"github.com/klconsultancy/selfhostctl/internal/k0scontainer"
 	"github.com/klconsultancy/selfhostctl/internal/kube"
 	"github.com/klconsultancy/selfhostctl/internal/phase"
@@ -64,6 +65,11 @@ type Deps struct {
 	GitOpsTimeout, GitOpsPoll time.Duration
 	// BreakGlassTimeout bounds the wait for the Break-glass controller's API.
 	BreakGlassTimeout time.Duration
+	// Revision reads the datastore's latest revision; datastore.Revision when nil.
+	Revision func(ctx context.Context, dataSource string) (int64, error)
+	// DatastoreQuiet is how long nothing may write to the datastore before recover
+	// starts anything on it.
+	DatastoreQuiet time.Duration
 }
 
 func (d *Deps) defaults() {
@@ -81,6 +87,12 @@ func (d *Deps) defaults() {
 	}
 	if d.Now == nil {
 		d.Now = time.Now
+	}
+	if d.Revision == nil {
+		d.Revision = datastore.Revision
+	}
+	if d.DatastoreQuiet == 0 {
+		d.DatastoreQuiet = time.Minute
 	}
 	if d.GitOpsTimeout == 0 {
 		d.GitOpsTimeout = 10 * time.Minute
