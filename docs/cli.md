@@ -86,7 +86,7 @@ While a Recovery is in progress (the Break-glass controller's container exists, 
 | `move-to-bootstrap` | The Cluster's namespace is in the Bootstrap cluster, unpaused. The pivot's gates; a dry run first; a `split` resumes. |
 | `delete-break-glass` | The Break-glass controller's container is gone. |
 | `infrastructure` | The Infrastructure adapter (`infrastructure.adapter`) has readied the old Machines' infrastructure. `none`, the default: done. |
-| `replace-machines` | The Cluster's Machines from before (recorded by name in the recovery ConfigMap, key `machines.json`) are gone: deleted without drain, volume wait or lifecycle hooks, since their nodes are gone. The control plane creates new ones, which come up on the datastore. |
+| `replace-machines` | The Cluster's Machines from before (recorded by name in the recovery ConfigMap, key `machines.json`) are gone: deleted without drain, volume wait or k0smotron's `kcp-cleanup` hook, since their nodes are gone. Another lifecycle hook on one of them blocks, before any is deleted: do or skip its cleanup, remove the annotation, run again. The control plane creates new ones, which come up on the datastore. |
 | `ready` | As in `bootstrap`, on the Bootstrap cluster: the new machines are healthy. |
 | `move-to-management` | The Cluster's namespace is back in the Management cluster, unpaused. The pivot's gates; with providers that differ, upgrade the Management cluster's first. |
 | `restore-webhooks` | The saved webhook configurations are in the Management cluster again. |

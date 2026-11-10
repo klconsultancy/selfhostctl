@@ -179,7 +179,7 @@ Agreed 2026-11-09, for #11 and #12. Profile `k0smotron-kine`.
 | Fact | Consequence |
 | --- | --- |
 | CAPD doesn't recreate the container of a provisioned DockerMachine | the old Machines must be deleted |
-| k0smotron's pre-terminate hook (`kcp-cleanup`) on each control-plane Machine asks the workload API, which is down: the deletion never ends, and the control plane creates no new Machine meanwhile | `recover` removes the old Machines' lifecycle hooks |
+| k0smotron's pre-terminate hook (`kcp-cleanup`) on each control-plane Machine asks the workload API, which is down: the deletion never ends, and the control plane creates no new Machine meanwhile | `recover` removes that hook from the old Machines |
 | CAPI drains a Machine with a Node, and waits for its volumes, through the workload API | `machine.cluster.x-k8s.io/exclude-node-draining` and `exclude-wait-for-node-volume-detach` on the old Machines |
 | With no old Machine left, k0smotron starts the first new one without a join token, from the CA secrets and `spec.k0s` (the same kine data source); later ones join through the API once the first answers | the new control plane comes up on the datastore; whether k0s does is what the e2e proves |
 
@@ -187,7 +187,8 @@ Agreed 2026-11-09, for #11 and #12. Profile `k0smotron-kine`.
 | --- | --- |
 | Infrastructure adapter | `infrastructure.adapter`, optional: `none` (the default, which CAPD needs) does nothing. Like a phase: Status and Run on the old Machines, before they are deleted; blocked blocks `recover`. #13 adds `capmox` and an outage check |
 | Old Machines | the Cluster's Machines when `replace-machines` first runs, recorded by name in the recovery ConfigMap (key `machines.json`). Only those are deleted: a re-run never touches the new ones |
-| Deleting them | control plane and workers at once: the annotations above, every `pre-drain.delete.hook…` and `pre-terminate.delete.hook…` annotation removed, then deleted, waited for (10 min) |
+| Deleting them | control plane and workers at once: the annotations above, `pre-terminate.delete.hook.machine.cluster.x-k8s.io/kcp-cleanup` removed, then deleted, waited for (10 min) |
+| Other lifecycle hooks | any other `pre-drain.delete.hook…` or `pre-terminate.delete.hook…` on an old Machine blocks, naming it, before any Machine is deleted: its owner's cleanup is the operator's call. Not chosen: removing every hook (an unknown owner's cleanup would be skipped silently) |
 | `ready` | the pivot's condition (#8), on the Bootstrap cluster |
 | Back | the pivot's move and gates, Bootstrap cluster → Management cluster. Providers that differ: upgrade the Management cluster's first |
 | Webhooks | the saved ones created again where missing |

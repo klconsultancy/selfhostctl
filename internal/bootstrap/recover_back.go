@@ -33,14 +33,44 @@ const MachinesKey = "machines.json"
 var controlNodeGVK = schema.GroupVersionKind{Group: "autopilot.k0sproject.io", Version: "v1beta2", Kind: "ControlNode"}
 
 // Annotations that let CAPI delete a Machine whose node is gone: no drain, no wait
-// for volumes. Its lifecycle hooks (k0smotron's pre-terminate kcp-cleanup among
-// them) would ask the dead cluster, so they are removed.
+// for volumes. k0smotron's pre-terminate hook asks the dead cluster, so it is
+// removed; any other lifecycle hook blocks: its owner's cleanup is the operator's
+// call.
 const (
 	excludeDraining      = "machine.cluster.x-k8s.io/exclude-node-draining"
 	excludeVolumeDetach  = "machine.cluster.x-k8s.io/exclude-wait-for-node-volume-detach"
 	preDrainHookPrefix   = "pre-drain.delete.hook.machine.cluster.x-k8s.io"
 	preTerminateHookPref = "pre-terminate.delete.hook.machine.cluster.x-k8s.io"
+	kcpCleanupHook       = preTerminateHookPref + "/kcp-cleanup"
 )
+
+// foreignHooks are a Machine's lifecycle hooks other than k0smotron's.
+func foreignHooks(m *unstructured.Unstructured) []string {
+	var out []string
+	for k := range m.GetAnnotations() {
+		if k != kcpCleanupHook && (strings.HasPrefix(k, preDrainHookPrefix+"/") || strings.HasPrefix(k, preTerminateHookPref+"/")) {
+			out = append(out, k)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// hooksBlock is the Blocked status for old Machines with foreign hooks, or nil.
+func hooksBlock(machines []*unstructured.Unstructured) *phase.Status {
+	var found []string
+	for _, m := range machines {
+		if h := foreignHooks(m); len(h) > 0 {
+			found = append(found, fmt.Sprintf("Machine %s: %s", m.GetName(), strings.Join(h, ", ")))
+		}
+	}
+	if len(found) == 0 {
+		return nil
+	}
+	return &phase.Status{State: phase.Blocked, Reason: fmt.Sprintf(
+		"old Machines carry lifecycle hooks recover doesn't know (%s); their cleanup may ask the dead cluster. Do or skip it, remove the annotations, then run again",
+		strings.Join(found, "; "))}
+}
 
 // poll is how often the waits of the second half look.
 const poll = 2 * time.Second
@@ -251,16 +281,19 @@ func (p *replaceMachinesPhase) Status(ctx context.Context) (phase.Status, error)
 	if err != nil || blocked != nil {
 		return deref(blocked), err
 	}
-	names, ok, err := recordedMachines(ctx, c)
+	names, err := oldMachines(ctx, c, p.cfg)
 	if err != nil {
 		return phase.Status{}, err
-	}
-	if !ok {
-		return phase.Status{State: phase.Next, Reason: "records the old Machines, then deletes them"}, nil
 	}
 	left, err := existingMachines(ctx, c, p.cfg.Cluster.Namespace, names)
 	if err != nil {
 		return phase.Status{}, err
+	}
+	if blocked := hooksBlock(left); blocked != nil {
+		return *blocked, nil
+	}
+	if _, ok, err := recordedMachines(ctx, c); err != nil || !ok {
+		return phase.Status{State: phase.Next, Reason: "records the old Machines, then deletes them"}, err
 	}
 	if len(left) > 0 {
 		return phase.Status{State: phase.Next, Reason: fmt.Sprintf("%d of the %d old Machines left", len(left), len(names))}, nil
@@ -284,6 +317,9 @@ func (p *replaceMachinesPhase) Run(ctx context.Context) error {
 	left, err := existingMachines(ctx, c, ns, names)
 	if err != nil {
 		return err
+	}
+	if blocked := hooksBlock(left); blocked != nil {
+		return errors.New(blocked.Reason)
 	}
 	for _, m := range left {
 		if err := deleteDeadMachine(ctx, c, m); err != nil {
@@ -310,12 +346,7 @@ func (p *replaceMachinesPhase) Run(ctx context.Context) error {
 // deleteDeadMachine deletes a Machine whose node is gone: nothing to drain, no hook
 // to wait for.
 func deleteDeadMachine(ctx context.Context, c ctrlclient.Client, m *unstructured.Unstructured) error {
-	ann := map[string]any{excludeDraining: "true", excludeVolumeDetach: "true"}
-	for k := range m.GetAnnotations() {
-		if strings.HasPrefix(k, preDrainHookPrefix+"/") || strings.HasPrefix(k, preTerminateHookPref+"/") {
-			ann[k] = nil
-		}
-	}
+	ann := map[string]any{excludeDraining: "true", excludeVolumeDetach: "true", kcpCleanupHook: nil}
 	patch, err := json.Marshal(map[string]any{"metadata": map[string]any{"annotations": ann}})
 	if err != nil {
 		return err

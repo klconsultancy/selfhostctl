@@ -519,6 +519,47 @@ func TestRecoverUnpausesAChildOnceItAnswers(t *testing.T) {
 	}
 }
 
+// recover removes only k0smotron's hook: another blocks, before any Machine goes,
+// until the operator removes it.
+func TestRecoverBlocksOnAnotherLifecycleHook(t *testing.T) {
+	w := down(t)
+	ctx := t.Context()
+	const hook = preDrainHookPrefix + "/someone"
+	setHook := func(c ctrlclient.Client, on bool) {
+		m := &unstructured.Unstructured{}
+		m.SetGroupVersionKind(machineListGVK.GroupVersion().WithKind("Machine"))
+		if err := c.Get(ctx, ctrlclient.ObjectKey{Namespace: "mgmt", Name: "mgmt-old-2"}, m); err != nil {
+			t.Fatal(err)
+		}
+		ann := m.GetAnnotations()
+		if on {
+			ann[hook] = ""
+		} else {
+			delete(ann, hook)
+		}
+		m.SetAnnotations(ann)
+		if err := c.Update(ctx, m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setHook(w.breakGlass, true)
+	var out bytes.Buffer
+	err := phase.Run(ctx, w.recoverPhases(t, fluxYAML), "", &out)
+	if !phase.IsStop(err) || !strings.Contains(err.Error(), "replace-machines: blocked: old Machines carry lifecycle hooks recover doesn't know (Machine mgmt-old-2: "+hook+")") {
+		t.Fatalf("%v\n%s", err, out.String())
+	}
+	if len(w.deleted) != 0 {
+		t.Errorf("deleted %v", w.deleted)
+	}
+
+	setHook(w.bootstrap, false)
+	out.Reset()
+	_ = phase.Run(ctx, w.recoverPhases(t, fluxYAML), "", &out)
+	if len(w.deleted) != 2 {
+		t.Errorf("after the operator removed it, deleted %v\n%s", w.deleted, out.String())
+	}
+}
+
 func TestRecoverWritesTheBreakGlassFiles(t *testing.T) {
 	w := down(t)
 	ps := w.recoverPhases(t)
