@@ -61,8 +61,10 @@ type Spec struct {
 	Mounts  []Mount
 	Labels  map[string]string
 	// Files are written into the container, by absolute path and mode 0600, before it
-	// first starts.
-	Files map[string][]byte
+	// first starts. Those in Readable get 0644: a component that doesn't run as root
+	// reads them.
+	Files    map[string][]byte
+	Readable map[string]bool
 }
 
 // Cluster is one k0s container.
@@ -161,7 +163,7 @@ func (c *Cluster) create(ctx context.Context) error {
 	if len(c.Spec.Files) == 0 {
 		return nil
 	}
-	archive, err := tarFiles(c.Spec.Files)
+	archive, err := tarFiles(c.Spec.Files, c.Spec.Readable)
 	if err != nil {
 		return err
 	}
@@ -172,7 +174,7 @@ func (c *Cluster) create(ctx context.Context) error {
 }
 
 // tarFiles packs files, with their parent directories, rooted at /.
-func tarFiles(files map[string][]byte) (io.Reader, error) {
+func tarFiles(files map[string][]byte, readable map[string]bool) (io.Reader, error) {
 	paths := slices.Sorted(maps.Keys(files))
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
@@ -193,7 +195,11 @@ func tarFiles(files map[string][]byte) (io.Reader, error) {
 	}
 	for _, p := range paths {
 		content := files[p]
-		if err := tw.WriteHeader(&tar.Header{Typeflag: tar.TypeReg, Name: strings.TrimPrefix(p, "/"), Mode: 0o600, Size: int64(len(content))}); err != nil {
+		mode := int64(0o600)
+		if readable[p] {
+			mode = 0o644
+		}
+		if err := tw.WriteHeader(&tar.Header{Typeflag: tar.TypeReg, Name: strings.TrimPrefix(p, "/"), Mode: mode, Size: int64(len(content))}); err != nil {
 			return nil, err
 		}
 		if _, err := tw.Write(content); err != nil {

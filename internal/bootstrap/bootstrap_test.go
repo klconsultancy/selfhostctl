@@ -40,6 +40,7 @@ type fakeContainer struct {
 	image   string
 	running bool
 	files   map[string][]byte
+	modes   map[string]int64
 }
 
 // fakePort is the API port Docker published for a container: the Break-glass
@@ -117,7 +118,7 @@ func (d *fakeDocker) NetworkCreate(context.Context, string, client.NetworkCreate
 
 func (d *fakeDocker) CopyToContainer(_ context.Context, id string, o client.CopyToContainerOptions) (client.CopyToContainerResult, error) {
 	c := d.containers[id]
-	c.files = map[string][]byte{}
+	c.files, c.modes = map[string][]byte{}, map[string]int64{}
 	tr := tar.NewReader(o.Content)
 	for {
 		h, err := tr.Next()
@@ -129,7 +130,7 @@ func (d *fakeDocker) CopyToContainer(_ context.Context, id string, o client.Copy
 		}
 		if h.Typeflag == tar.TypeReg {
 			b, _ := io.ReadAll(tr)
-			c.files["/"+h.Name] = b
+			c.files["/"+h.Name], c.modes["/"+h.Name] = b, h.Mode
 		}
 	}
 }

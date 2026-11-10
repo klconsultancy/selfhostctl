@@ -38,8 +38,10 @@ type Controller struct {
 	Version string
 	// Args follow `k0s`.
 	Args []string
-	// Files are written into the container before it starts, by absolute path.
-	Files map[string][]byte
+	// Files are written into the container before it starts, by absolute path, mode
+	// 0600; Readable ones 0644.
+	Files    map[string][]byte
+	Readable map[string]bool
 }
 
 // Image is the k0s image of a k0s version: its "+" becomes "-".
@@ -99,6 +101,7 @@ func Derive(kcp *unstructured.Unstructured, version string, s Secrets) (Controll
 		"sans":            []any{"127.0.0.1", "localhost"},
 	}
 	files := map[string][]byte{}
+	readable := map[string]bool{}
 	if extra, ok, _ := unstructured.NestedMap(spec, "api", "extraArgs"); ok {
 		api["extraArgs"] = extra
 		if path, _ := extra["encryption-provider-config"].(string); path != "" {
@@ -106,6 +109,9 @@ func Derive(kcp *unstructured.Unstructured, version string, s Secrets) (Controll
 				return Controller{}, errors.New("the K0sControlPlane encrypts Secrets at rest, and there is no encryption key")
 			}
 			files[path] = encryptionConfig(s.EncryptionKey)
+			// kube-apiserver reads it, and k0s runs it as its own user: 0644, as the
+			// machines have it.
+			readable[path] = true
 		}
 	}
 
@@ -138,7 +144,8 @@ func Derive(kcp *unstructured.Unstructured, version string, s Secrets) (Controll
 		Version: version,
 		Args: []string{"controller", "--config=" + ConfigPath, "--enable-dynamic-config",
 			"--disable-components=" + strings.Join(disabled(args), ",")},
-		Files: files,
+		Files:    files,
+		Readable: readable,
 	}, nil
 }
 

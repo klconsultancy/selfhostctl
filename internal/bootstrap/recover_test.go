@@ -372,6 +372,32 @@ func TestRecoverWritesTheBreakGlassFiles(t *testing.T) {
 	if !strings.Contains(string(files["/etc/k0s/k0s.yaml"]), "postgres://from-the-environment") || !strings.Contains(string(files["/etc/k0s/k0s.yaml"]), "externalAddress: 172.18.0.10") {
 		t.Errorf("k0s.yaml:\n%s", files["/etc/k0s/k0s.yaml"])
 	}
+	// kube-apiserver, not root, reads the encryption config; the keys stay root's.
+	modes := w.docker.containers["selfhostctl-mgmt-break-glass"].modes
+	for f, want := range map[string]int64{"/etc/k0s/encryption-config.yaml": 0o644, "/var/lib/k0s/pki/ca.key": 0o600, "/etc/k0s/k0s.yaml": 0o600} {
+		if modes[f] != want {
+			t.Errorf("%s: mode %o, want %o", f, modes[f], want)
+		}
+	}
+}
+
+// A stopped Break-glass controller is made again, from the current config.
+func TestRecoverRemakesAStoppedBreakGlass(t *testing.T) {
+	w := down(t)
+	w.docker.containers["selfhostctl-mgmt-break-glass"] = &fakeContainer{image: "docker.io/k0sproject/k0s:v1.36.5-k0s.0"}
+	var bg phase.Phase
+	for _, p := range w.recoverPhases(t) {
+		if p.Name() == "break-glass" {
+			bg = p
+		}
+	}
+	if err := bg.Run(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	c := w.docker.containers["selfhostctl-mgmt-break-glass"]
+	if len(w.docker.created) != 1 || !c.running || len(c.files) == 0 {
+		t.Errorf("created %d, running %v, %d files", len(w.docker.created), c.running, len(c.files))
+	}
 }
 
 func TestRecoverBreakGlassAtTheLiveVersion(t *testing.T) {

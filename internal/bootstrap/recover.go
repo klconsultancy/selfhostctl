@@ -65,12 +65,13 @@ func breakGlassCluster(cfg *config.ManagementCluster, docker k0scontainer.Docker
 	return &k0scontainer.Cluster{
 		Docker: docker,
 		Spec: k0scontainer.Spec{
-			Name:    BreakGlassName(cfg),
-			Image:   breakglass.Image(c.Version),
-			Args:    c.Args,
-			Network: cfg.BootstrapCluster.Network,
-			Labels:  map[string]string{LabelCluster: cfg.Metadata.Name, LabelRole: "break-glass"},
-			Files:   c.Files,
+			Name:     BreakGlassName(cfg),
+			Image:    breakglass.Image(c.Version),
+			Args:     c.Args,
+			Network:  cfg.BootstrapCluster.Network,
+			Labels:   map[string]string{LabelCluster: cfg.Metadata.Name, LabelRole: "break-glass"},
+			Files:    c.Files,
+			Readable: c.Readable,
 		},
 	}
 }
@@ -390,6 +391,14 @@ func (p *breakGlassPhase) Run(ctx context.Context) error {
 		return err
 	}
 	ctrl := breakglass.Controller{}
+	if o.Exists && !o.Running {
+		// It holds no state of its own, and a stopped one may have stopped on its
+		// config: made again from the current one.
+		if err := p.container(ctrl).Remove(ctx); err != nil {
+			return err
+		}
+		o.Exists = false
+	}
 	if !o.Exists {
 		if ctrl, err = p.controller(""); err != nil {
 			return err
@@ -431,6 +440,11 @@ func (p *breakGlassPhase) wait(ctx context.Context, bg *k0scontainer.Cluster) ([
 	deadline := time.Now().Add(p.timeout)
 	var last error
 	for {
+		if o, err := bg.Inspect(ctx); err != nil {
+			return nil, err
+		} else if !o.Running {
+			return nil, fmt.Errorf("the Break-glass controller (container %s) stopped: see docker logs %s", bg.Spec.Name, bg.Spec.Name)
+		}
 		kc, err := bg.Kubeconfig(ctx)
 		if err == nil {
 			if _, err = p.liveVersion(ctx, kc); err == nil {
