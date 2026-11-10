@@ -228,8 +228,11 @@ run() {
   ! docker container inspect "$BG" >/dev/null 2>&1 || die "the Break-glass controller is still there"
   kb -n mgmt get cluster mgmt >/dev/null || die "the Cluster isn't in the Bootstrap cluster"
   kb -n mgmt get k0scontrolplanes,machines
-  kb -n kube-system get configmap selfhostctl-recovery-webhooks -o jsonpath='{.data.webhooks\.json}' | grep -q WebhookConfiguration \
-    || die "the providers' webhooks weren't saved"
+  # Not piped into grep -q: with pipefail, grep stopping at the first match fails the pipe.
+  local hooks
+  hooks=$(kb -n kube-system get configmap selfhostctl-recovery-webhooks -o jsonpath='{.data.webhooks\.json}')
+  grep -q '"kind": "ValidatingWebhookConfiguration"' <<<"$hooks" \
+    || { printf '%.3000s\n' "$hooks"; die "the providers' webhooks weren't saved"; }
   out=$("$BIN" recover -f "$CFG")
   echo "$out"
   ! grep -q running <<<"$out" || die "a second recover ran a phase"
