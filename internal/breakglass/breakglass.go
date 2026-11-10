@@ -137,6 +137,11 @@ func Derive(kcp *unstructured.Unstructured, version string, s Secrets) (Controll
 	files[ConfigPath] = cfg
 	for path, content := range pki(s.Bundle) {
 		files[path] = content
+		// Certificates are public, and kube-apiserver reads them as its own user:
+		// 0644, as k0s writes them. k0s itself chowns the keys its components read.
+		if !strings.HasSuffix(path, ".key") {
+			readable[path] = true
+		}
 	}
 
 	args, _, _ := unstructured.NestedStringSlice(kcp.Object, "spec", "k0sConfigSpec", "args")

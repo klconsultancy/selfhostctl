@@ -374,7 +374,8 @@ func TestRecoverWritesTheBreakGlassFiles(t *testing.T) {
 	}
 	// kube-apiserver, not root, reads the encryption config; the keys stay root's.
 	modes := w.docker.containers["selfhostctl-mgmt-break-glass"].modes
-	for f, want := range map[string]int64{"/etc/k0s/encryption-config.yaml": 0o644, "/var/lib/k0s/pki/ca.key": 0o600, "/etc/k0s/k0s.yaml": 0o600} {
+	for f, want := range map[string]int64{"/etc/k0s/encryption-config.yaml": 0o644, "/var/lib/k0s/pki/ca.key": 0o600, "/etc/k0s/k0s.yaml": 0o600,
+		"/var/lib/k0s/pki/ca.crt": 0o644, "/var/lib/k0s/pki/sa.pub": 0o644, "/var/lib/k0s/pki/front-proxy-ca.crt": 0o644, "/var/lib/k0s/pki/sa.key": 0o600} {
 		if modes[f] != want {
 			t.Errorf("%s: mode %o, want %o", f, modes[f], want)
 		}
