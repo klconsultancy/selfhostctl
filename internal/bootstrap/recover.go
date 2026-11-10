@@ -23,6 +23,7 @@ import (
 	"github.com/klconsultancy/selfhostctl/internal/breakglass"
 	"github.com/klconsultancy/selfhostctl/internal/config"
 	"github.com/klconsultancy/selfhostctl/internal/gitops"
+	"github.com/klconsultancy/selfhostctl/internal/infrastructure"
 	"github.com/klconsultancy/selfhostctl/internal/k0scontainer"
 	"github.com/klconsultancy/selfhostctl/internal/phase"
 	"github.com/klconsultancy/selfhostctl/internal/recovery"
@@ -106,6 +107,16 @@ func RecoverPhases(cfg *config.ManagementCluster, deps Deps) []phase.Phase {
 		beforeMove{&deleteNodesPhase{loc: loc, clients: deps.Clients}, loc},
 		&moveToBootstrapPhase{move: movePhase{cfg: cfg, loc: loc, installer: deps.Providers, mover: deps.Mover, clients: deps.Clients}},
 		&deleteBreakGlassPhase{loc: loc, container: bg.container(breakglass.Controller{})},
+		// The second half: new machines on the datastore, the move back, the finish.
+		beforeMoveBack{&infrastructurePhase{cfg: cfg, loc: loc, clients: deps.Clients, adapter: infrastructure.For(cfg.Infrastructure)}, loc},
+		beforeMoveBack{&replaceMachinesPhase{cfg: cfg, loc: loc, clients: deps.Clients, timeout: deps.MachinesTimeout}, loc},
+		beforeMoveBack{&readyPhase{cfg: cfg, cluster: cluster, clients: deps.Clients, timeout: deps.ClusterReadyTimeout}, loc},
+		moveToManagementPhase{&movePhase{cfg: cfg, loc: loc, installer: deps.Providers, mover: deps.Mover, clients: deps.Clients}},
+		&restoreWebhooksPhase{loc: loc, clients: deps.Clients},
+		&leftoversPhase{cfg: cfg, loc: loc, clients: deps.Clients},
+		&resumeGitOpsPhase{tool: gitops.For(cfg.GitOps), loc: loc, clients: deps.Clients},
+		&unpauseChildrenPhase{cfg: cfg, loc: loc, clients: deps.Clients, timeout: deps.ChildrenTimeout},
+		&deleteBootstrapPhase{cfg: cfg, loc: loc, cluster: cluster, clients: deps.Clients, now: deps.Now},
 	}
 	for i, p := range phases {
 		phases[i] = tracked{p, loc}

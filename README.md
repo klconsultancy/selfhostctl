@@ -10,13 +10,17 @@
 
 One Go binary for the lifecycle of a self-managed [Cluster API](https://cluster-api.sigs.k8s.io) management cluster: bootstrap through a kind **Bootstrap cluster**, pivot, provider upgrade, recovery and status, driven by one declarative config file.
 
-> **Status: early development.** `bootstrap` brings a Management cluster up through its Bootstrap cluster until it manages itself. GitOps and recovery come next. The design is the [PRD](https://github.com/klconsultancy/selfhostctl/issues/1). See [the command line](docs/cli.md) and [the config](docs/config.md).
+> **Status: early development.** `bootstrap` brings a Management cluster up through its Bootstrap cluster until it manages itself, and gives Flux its credential. `recover` brings it back when its machines are gone. Provider upgrade comes next. The design is the [PRD](https://github.com/klconsultancy/selfhostctl/issues/1). See [the command line](docs/cli.md) and [the config](docs/config.md).
 
 ## Scope
 
 - **In scope:** the lifecycle of **one self-managed management cluster**: bootstrap, pivot, provider upgrade, recovery, status.
 - **Out of scope:** child (workload) clusters. The management cluster's GitOps applies them; they never need `selfhostctl`.
 - **Out of scope:** secret stores. The tool reads secrets from its environment and never talks to a vault.
+
+## During an outage
+
+When the Management cluster is down, the Child clusters' workloads keep running. A child whose control plane the Management cluster hosts has no API meanwhile. Nothing reconciles the children until the Management cluster is back: `recover` brings it back from its surviving datastore, then unpauses each child once its API answers ([recover](docs/cli.md#recover)).
 
 ## Support matrix
 

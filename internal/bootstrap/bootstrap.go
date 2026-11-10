@@ -70,6 +70,9 @@ type Deps struct {
 	// DatastoreQuiet is how long nothing may write to the datastore before recover
 	// starts anything on it.
 	DatastoreQuiet time.Duration
+	// MachinesTimeout bounds the wait for the old Machines to be deleted;
+	// ChildrenTimeout the wait for the Child clusters' APIs.
+	MachinesTimeout, ChildrenTimeout time.Duration
 }
 
 func (d *Deps) defaults() {
@@ -93,6 +96,12 @@ func (d *Deps) defaults() {
 	}
 	if d.DatastoreQuiet == 0 {
 		d.DatastoreQuiet = time.Minute
+	}
+	if d.MachinesTimeout == 0 {
+		d.MachinesTimeout = 10 * time.Minute
+	}
+	if d.ChildrenTimeout == 0 {
+		d.ChildrenTimeout = 10 * time.Minute
 	}
 	if d.GitOpsTimeout == 0 {
 		d.GitOpsTimeout = 10 * time.Minute

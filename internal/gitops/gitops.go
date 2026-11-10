@@ -22,6 +22,8 @@ type Tool interface {
 	Suspended(ctx context.Context, c ctrlclient.Client) ([]string, error)
 	// Unsuspended lists what Suspend would still stop.
 	Unsuspended(ctx context.Context, c ctrlclient.Client) ([]string, error)
+	// Marked lists what Suspend stopped and Resume would restart.
+	Marked(ctx context.Context, c ctrlclient.Client) ([]string, error)
 }
 
 // For is the config's GitOps tool; nil when the config has none.
@@ -51,6 +53,11 @@ func (fluxTool) Suspended(ctx context.Context, c ctrlclient.Client) ([]string, e
 
 func (fluxTool) Unsuspended(ctx context.Context, c ctrlclient.Client) ([]string, error) {
 	refs, err := flux.Unsuspended(ctx, c)
+	return names(refs), err
+}
+
+func (f fluxTool) Marked(ctx context.Context, c ctrlclient.Client) ([]string, error) {
+	refs, err := flux.Marked(ctx, c, f.root)
 	return names(refs), err
 }
 

@@ -85,8 +85,17 @@ While a Recovery is in progress (the Break-glass controller's container exists, 
 | `delete-nodes` | The datastore holds no Node: a new machine with a reused IP would match an old one. |
 | `move-to-bootstrap` | The Cluster's namespace is in the Bootstrap cluster, unpaused. The pivot's gates; a dry run first; a `split` resumes. |
 | `delete-break-glass` | The Break-glass controller's container is gone. |
+| `infrastructure` | The Infrastructure adapter (`infrastructure.adapter`) has readied the old Machines' infrastructure. `none`, the default: done. |
+| `replace-machines` | The Cluster's Machines from before (recorded by name in the recovery ConfigMap, key `machines.json`) are gone: deleted without drain, volume wait or lifecycle hooks, since their nodes are gone. The control plane creates new ones, which come up on the datastore. |
+| `ready` | As in `bootstrap`, on the Bootstrap cluster: the new machines are healthy. |
+| `move-to-management` | The Cluster's namespace is back in the Management cluster, unpaused. The pivot's gates; with providers that differ, upgrade the Management cluster's first. |
+| `restore-webhooks` | The saved webhook configurations are in the Management cluster again. |
+| `leftovers` | The Break-glass controller's and the old machines' autopilot `ControlNode`s and `kube-node-lease` leases are gone. |
+| `resume-gitops` | What `suspend-gitops` suspended is resumed, the root last. |
+| `unpause-children` | Every Cluster `pause-children` paused is unpaused, once the Management cluster is healthy and that child's API answers with all its Nodes Ready. One that doesn't stays paused: blocked after 10 minutes; run again later. |
+| `delete-bootstrap-cluster` | As in `bootstrap`: after the stable window, the Bootstrap cluster is deleted. Until then, exit 4: run again. That ends the Recovery. |
 
-The phases from `break-glass` to `delete-nodes` are done ("moved") once the objects are in the Bootstrap cluster.
+The phases from `break-glass` to `delete-nodes` are done ("moved") once the objects are in the Bootstrap cluster; `infrastructure` to `ready` once they are back in the Management cluster. After the Recovery, `recover` finds nothing to recover (exit 3).
 
 ## Exit codes
 

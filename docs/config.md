@@ -83,6 +83,7 @@ None of the `recovery` variables has to be set to start a bootstrap: the checkpo
 | `gitops.flux.credentialSecret.fromEnv` | yes | The variable holding the SSH private key (the Secret's `identity`). Required for every command, like the other variables the config names. |
 | `gitops.flux.credentialSecret.knownHosts` | yes | A file with the git server's host keys, in `known_hosts` format (the Secret's `known_hosts`). Public: keep it next to the config. |
 | `gitops.flux.root` | no | `{namespace, name}` of the Kustomization that syncs everything else; `flux-system/flux-system` (flux-operator's) when empty. |
+| `infrastructure.adapter` | no | The Infrastructure adapter `recover` asks before it deletes the old Machines: `none` (the default) does nothing, which is what CAPD needs. |
 
 | Field | Required | Meaning |
 | --- | --- | --- |
