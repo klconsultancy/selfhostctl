@@ -152,6 +152,7 @@ Agreed 2026-11-09, for #11 and #12. Profile `k0smotron-kine`.
 | Clock | none: revisions, not timestamps |
 | Datastore | Postgres only (`postgres://`, `postgresql://`); another one → the phase fails. Read with the same data source as the Break-glass controller, so it must resolve from the operator's host too |
 | Once started | done while a Recovery is in progress: the Break-glass controller writes to it itself |
+| Limit | machines cut off from the datastore, but not from the operator, write nothing and pass the gate. Their control plane is down (no API, controllers lose their leader leases), but the VMs still run: once the network returns, they run next to the machines `recover` replaces (#12), and their kubelets register again. Only an infrastructure check covers this (#13) |
 | Not chosen | the leases, read through the Break-glass controller (it runs on a live datastore before the proof); a confirmation flag per run, or the operator's monitoring alone (both see from the operator's side of a cut-off); an infrastructure check (not generic; an Infrastructure adapter may add one, #13) |
 
 | Decision | Choice |
