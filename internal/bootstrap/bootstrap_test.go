@@ -3,6 +3,7 @@ package bootstrap
 import (
 	"archive/tar"
 	"bytes"
+	"cmp"
 	"context"
 	"io"
 	"net/netip"
@@ -14,6 +15,7 @@ import (
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/network"
+	"github.com/moby/moby/api/types/system"
 	"github.com/moby/moby/client"
 
 	"github.com/klconsultancy/selfhostctl/internal/beforeapply"
@@ -27,11 +29,27 @@ import (
 type fakeDocker struct {
 	containers map[string]*fakeContainer
 	created    []client.ContainerCreateOptions
+	// memory is Docker's MemTotal; 8 GiB when zero.
+	memory int64
+	// inotify is what the host's inotify limits read as; kind's values when empty.
+	inotify string
+	execs   []string
 }
 
 type fakeContainer struct {
 	image   string
 	running bool
+	files   map[string][]byte
+	modes   map[string]int64
+}
+
+// fakePort is the API port Docker published for a container: the Break-glass
+// controller's differs from the Bootstrap cluster's, so their kubeconfigs do.
+func fakePort(name string) string {
+	if strings.HasSuffix(name, "-break-glass") {
+		return "32002"
+	}
+	return "32001"
 }
 
 func newFakeDocker() *fakeDocker { return &fakeDocker{containers: map[string]*fakeContainer{}} }
@@ -45,7 +63,7 @@ func (d *fakeDocker) ContainerInspect(_ context.Context, id string, _ client.Con
 		State:  &container.State{Running: c.running},
 		Config: &container.Config{Image: c.image},
 		NetworkSettings: &container.NetworkSettings{Ports: network.PortMap{
-			network.MustParsePort("6443/tcp"): {{HostIP: netip.MustParseAddr("127.0.0.1"), HostPort: "32001"}},
+			network.MustParsePort("6443/tcp"): {{HostIP: netip.MustParseAddr("127.0.0.1"), HostPort: fakePort(id)}},
 		}},
 	}}, nil
 }
@@ -73,6 +91,9 @@ func (d *fakeDocker) CopyFromContainer(_ context.Context, id string, o client.Co
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
 	content := []byte("server: https://localhost:6443\n")
+	if o.SourcePath == "/tmp/selfhostctl-output" {
+		content = []byte(cmp.Or(d.inotify, "524288\n512\n"))
+	}
 	_ = tw.WriteHeader(&tar.Header{Name: "admin.conf", Mode: 0o600, Size: int64(len(content))})
 	_, _ = tw.Write(content)
 	_ = tw.Close()
@@ -93,6 +114,42 @@ func (d *fakeDocker) NetworkInspect(context.Context, string, client.NetworkInspe
 
 func (d *fakeDocker) NetworkCreate(context.Context, string, client.NetworkCreateOptions) (client.NetworkCreateResult, error) {
 	panic("the network exists")
+}
+
+func (d *fakeDocker) CopyToContainer(_ context.Context, id string, o client.CopyToContainerOptions) (client.CopyToContainerResult, error) {
+	c := d.containers[id]
+	c.files, c.modes = map[string][]byte{}, map[string]int64{}
+	tr := tar.NewReader(o.Content)
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			return client.CopyToContainerResult{}, nil
+		}
+		if err != nil {
+			return client.CopyToContainerResult{}, err
+		}
+		if h.Typeflag == tar.TypeReg {
+			b, _ := io.ReadAll(tr)
+			c.files["/"+h.Name], c.modes["/"+h.Name] = b, h.Mode
+		}
+	}
+}
+
+func (d *fakeDocker) ExecCreate(_ context.Context, id string, o client.ExecCreateOptions) (client.ExecCreateResult, error) {
+	d.execs = append(d.execs, id+": "+strings.Join(o.Cmd, " "))
+	return client.ExecCreateResult{ID: "exec"}, nil
+}
+
+func (d *fakeDocker) ExecStart(context.Context, string, client.ExecStartOptions) (client.ExecStartResult, error) {
+	return client.ExecStartResult{}, nil
+}
+
+func (d *fakeDocker) ExecInspect(context.Context, string, client.ExecInspectOptions) (client.ExecInspectResult, error) {
+	return client.ExecInspectResult{}, nil
+}
+
+func (d *fakeDocker) Info(context.Context, client.InfoOptions) (client.SystemInfoResult, error) {
+	return client.SystemInfoResult{Info: system.Info{MemTotal: cmp.Or(d.memory, 8<<30)}}, nil
 }
 
 const testYAML = `

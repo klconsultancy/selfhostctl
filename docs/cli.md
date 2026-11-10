@@ -3,6 +3,7 @@
 ```sh
 selfhostctl bootstrap       -f management.yaml [--from <phase>] [--first]
 selfhostctl pivot           -f management.yaml
+selfhostctl recover         -f management.yaml [--from <phase>]   # with the Recovery bundle, e.g. via op run
 selfhostctl status          -f management.yaml
 selfhostctl providers adopt -f management.yaml
 selfhostctl gitops sync     -f management.yaml
@@ -28,7 +29,7 @@ The config is described in [config.md](config.md). Terms such as Phase, Manual c
 
 `--from <phase>` starts at that Phase, skipping the ones before it, e.g. to resume a step that failed halfway. `status` lists every Phase with its state and reason, without changing anything. No command ever prompts.
 
-**Location.** Every run first works out where the Management cluster's objects live (docs/design.md#lifecycle-state): `none`, `bootstrap`, `split` (a move stopped halfway), `management`, or `unknown`. `status` prints it first.
+**Location.** Every run first works out where the Management cluster's objects live (docs/design.md#lifecycle-state): `none`, `bootstrap`, `split` (a move stopped halfway), `management`, `break-glass` (during a Recovery), or `unknown`. `status` prints it first, and whether a Recovery is in progress.
 
 | Location | Phases before `management-providers` | Bootstrap cluster |
 | --- | --- | --- |
@@ -44,7 +45,7 @@ The config is described in [config.md](config.md). Terms such as Phase, Manual c
 
 `pivot` runs bootstrap's phases from `management-providers`.
 
-`gitops sync` runs the `gitops` phase alone against the live Management cluster, e.g. after a new deploy key or a moved root Kustomization. Done already: nothing is written. `status` prints a warning for every suspended Flux Kustomization and HelmRelease. `providers adopt` stamps a Management cluster's providers, installed some other way, with the config's variables fingerprint, after checking their versions. Run it only if they run with exactly `providers.variables`.
+`gitops sync` runs the `gitops` phase alone against the live Management cluster, e.g. after a new deploy key or a moved root Kustomization. Done already: nothing is written. `status` prints a warning for every suspended Flux Kustomization and HelmRelease, and for every paused Cluster. `providers adopt` stamps a Management cluster's providers, installed some other way, with the config's variables fingerprint, after checking their versions. Run it only if they run with exactly `providers.variables`.
 
 `bootstrap` has these Phases:
 
@@ -63,6 +64,29 @@ The config is described in [config.md](config.md). Terms such as Phase, Manual c
 | `after-pivot` | The `afterPivot` entries are in place on the Management cluster. |
 | `gitops` | With `gitops`: the credential Secret holds the key from `gitops.flux.credentialSecret.fromEnv` and the `knownHosts` file, every FluxInstance is Ready, the root Kustomization's source is Ready, and the root applied its revision. Running it writes the Secret when it differs (never with an empty field), then has Flux fetch and apply now, and waits: a fresh fetch, not the last good artifact. A failing fetch fails with Flux's message. Without Flux's CRDs in time it is **blocked**: "is Flux in the cluster's definition?". Without `gitops`: done. |
 | `delete-bootstrap-cluster` | No Bootstrap cluster exists. Before it is deleted, the Management cluster must be `Available` with `RemoteConnectionProbe`, have every Machine `NodeHealthy`, and have had no change (condition or new Machine) for `bootstrapCluster.deleteAfterStable`. Until then it is **manual**: "stable for X of Y, run again then". |
+
+## recover
+
+`recover` brings back a Management cluster whose machines are all gone, from its surviving datastore (profile `k0smotron-kine`). It reads the Recovery bundle, the kine data source and the encryption key from the variables `recovery` names; unset or empty → exit 2. Load them for this one command only: `op run -- selfhostctl recover -f management.yaml`.
+
+While a Recovery is in progress (the Break-glass controller's container exists, or the Bootstrap cluster holds the saved webhooks), `bootstrap` and `pivot` are blocked and `status` lists `recover`'s Phases.
+
+| Phase | Done when |
+| --- | --- |
+| `outage` | **The gate.** The kubeconfig's cluster doesn't answer at all, or a Recovery is in progress. Blocked when it answers ("nothing to recover"), refuses the kubeconfig (renew it), the objects are in the Bootstrap cluster before a pivot, or there is no kubeconfig (write one with `kubeconfig renew`). |
+| `datastore` | **The proof of the outage**, before anything starts: nothing writes to the datastore for 60 seconds (kine's revision doesn't grow). Otherwise blocked: a live cluster writes to it, and may only be cut off from here (a VPN, an API proxy); nothing was started. Postgres only; the data source must resolve from this host. Done while a Recovery is in progress. |
+| `bootstrap-cluster` | As in `bootstrap`. |
+| `host` | Docker has at least 4 GiB of memory, and the Docker host's `fs.inotify.max_user_watches` ≥ 524288 and `max_user_instances` ≥ 512, read inside the Bootstrap cluster's container. Otherwise blocked, with the `sysctl -w` to run on the Docker host. |
+| `providers`, `before-apply` | As in `bootstrap`. |
+| `break-glass` | The Break-glass controller (`selfhostctl-<name>-break-glass`, k0s without a worker, the API on localhost only) serves the datastore, at the live K0sControlPlane's version. It is started at the version in `cluster.manifests`; if the live one differs, it is recreated at that. Its config comes from the K0sControlPlane (see [design.md](design.md#recovery)): `--disable-components`, `api.extraArgs`, `storage`, the network CIDRs, with dynamic config on. The bundle gives its PKI and `externalAddress`; the encryption key its encryption config, which must be `aescbc` with key `key1`, then `identity`. |
+| `webhooks` | The providers' webhook configurations (label `cluster.x-k8s.io/provider`) are saved in the Bootstrap cluster's ConfigMap `kube-system/selfhostctl-recovery-webhooks` and gone from the datastore: no pod serves them, and the move must pass. Saved once; a re-run keeps the saved ones. |
+| `suspend-gitops` | Every Flux Kustomization and HelmRelease is suspended, the root first. Without `gitops`: done. |
+| `pause-children` | Every Cluster outside the Management cluster's namespace is paused, marked `selfhostctl.io/paused`. One you paused yourself is left alone. |
+| `delete-nodes` | The datastore holds no Node: a new machine with a reused IP would match an old one. |
+| `move-to-bootstrap` | The Cluster's namespace is in the Bootstrap cluster, unpaused. The pivot's gates; a dry run first; a `split` resumes. |
+| `delete-break-glass` | The Break-glass controller's container is gone. |
+
+The phases from `break-glass` to `delete-nodes` are done ("moved") once the objects are in the Bootstrap cluster.
 
 ## Exit codes
 

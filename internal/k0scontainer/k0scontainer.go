@@ -9,7 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/netip"
+	"path"
+	"slices"
+	"strings"
+	"time"
 
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/moby/moby/api/types/container"
@@ -30,6 +35,11 @@ type Docker interface {
 	ImagePull(ctx context.Context, ref string, options client.ImagePullOptions) (client.ImagePullResponse, error)
 	NetworkInspect(ctx context.Context, id string, options client.NetworkInspectOptions) (client.NetworkInspectResult, error)
 	NetworkCreate(ctx context.Context, name string, options client.NetworkCreateOptions) (client.NetworkCreateResult, error)
+	CopyToContainer(ctx context.Context, id string, options client.CopyToContainerOptions) (client.CopyToContainerResult, error)
+	ExecCreate(ctx context.Context, id string, options client.ExecCreateOptions) (client.ExecCreateResult, error)
+	ExecStart(ctx context.Context, execID string, options client.ExecStartOptions) (client.ExecStartResult, error)
+	ExecInspect(ctx context.Context, execID string, options client.ExecInspectOptions) (client.ExecInspectResult, error)
+	Info(ctx context.Context, options client.InfoOptions) (client.SystemInfoResult, error)
 }
 
 // Mount is a bind mount from the host.
@@ -50,6 +60,11 @@ type Spec struct {
 	Network string
 	Mounts  []Mount
 	Labels  map[string]string
+	// Files are written into the container, by absolute path and mode 0600, before it
+	// first starts. Those in Readable get 0644: a component that doesn't run as root
+	// reads them.
+	Files    map[string][]byte
+	Readable map[string]bool
 }
 
 // Cluster is one k0s container.
@@ -145,7 +160,53 @@ func (c *Cluster) create(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("create container %s: %w", c.Spec.Name, err)
 	}
+	if len(c.Spec.Files) == 0 {
+		return nil
+	}
+	archive, err := tarFiles(c.Spec.Files, c.Spec.Readable)
+	if err != nil {
+		return err
+	}
+	if _, err := c.Docker.CopyToContainer(ctx, c.Spec.Name, client.CopyToContainerOptions{DestinationPath: "/", Content: archive}); err != nil {
+		return fmt.Errorf("copy files into container %s: %w", c.Spec.Name, err)
+	}
 	return nil
+}
+
+// tarFiles packs files, with their parent directories, rooted at /.
+func tarFiles(files map[string][]byte, readable map[string]bool) (io.Reader, error) {
+	paths := slices.Sorted(maps.Keys(files))
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	dirs := map[string]bool{}
+	for _, p := range paths {
+		if !path.IsAbs(p) {
+			return nil, fmt.Errorf("file %s: not an absolute path", p)
+		}
+		rel := strings.TrimPrefix(p, "/")
+		for d := path.Dir(rel); d != "." && !dirs[d]; d = path.Dir(d) {
+			dirs[d] = true
+		}
+	}
+	for _, d := range slices.Sorted(maps.Keys(dirs)) {
+		if err := tw.WriteHeader(&tar.Header{Typeflag: tar.TypeDir, Name: d + "/", Mode: 0o755}); err != nil {
+			return nil, err
+		}
+	}
+	for _, p := range paths {
+		content := files[p]
+		mode := int64(0o600)
+		if readable[p] {
+			mode = 0o644
+		}
+		if err := tw.WriteHeader(&tar.Header{Typeflag: tar.TypeReg, Name: strings.TrimPrefix(p, "/"), Mode: mode, Size: int64(len(content))}); err != nil {
+			return nil, err
+		}
+		if _, err := tw.Write(content); err != nil {
+			return nil, err
+		}
+	}
+	return &buf, tw.Close()
 }
 
 func (c *Cluster) pull(ctx context.Context) error {
@@ -222,6 +283,39 @@ func (c *Cluster) readFile(ctx context.Context, path string) ([]byte, error) {
 		return nil, fmt.Errorf("read %s from %s: %w", path, c.Spec.Name, err)
 	}
 	return io.ReadAll(tr)
+}
+
+// outputPath is where Output's script writes, inside the container.
+const outputPath = "/tmp/selfhostctl-output"
+
+// Output runs a shell script inside the running container through the Docker API (no
+// process on the operator's machine) and returns what it wrote to stdout.
+func (c *Cluster) Output(ctx context.Context, script string) ([]byte, error) {
+	ex, err := c.Docker.ExecCreate(ctx, c.Spec.Name, client.ExecCreateOptions{Cmd: []string{"sh", "-c", "(" + script + ") >" + outputPath}})
+	if err != nil {
+		return nil, fmt.Errorf("exec in container %s: %w", c.Spec.Name, err)
+	}
+	if _, err := c.Docker.ExecStart(ctx, ex.ID, client.ExecStartOptions{Detach: true}); err != nil {
+		return nil, fmt.Errorf("exec in container %s: %w", c.Spec.Name, err)
+	}
+	for {
+		res, err := c.Docker.ExecInspect(ctx, ex.ID, client.ExecInspectOptions{})
+		if err != nil {
+			return nil, fmt.Errorf("exec in container %s: %w", c.Spec.Name, err)
+		}
+		if !res.Running {
+			if res.ExitCode != 0 {
+				return nil, fmt.Errorf("exec in container %s: %q exited with %d", c.Spec.Name, script, res.ExitCode)
+			}
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	return c.readFile(ctx, outputPath)
 }
 
 // Remove deletes the container and its data volume.

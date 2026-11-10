@@ -8,7 +8,14 @@
 #      has passed (it stops at that checkpoint until then);
 #   4. bootstrap again runs nothing, even without the Recovery bundle;
 #   5. the Management cluster scales itself to two machines;
-#   6. without its kubeconfig, bootstrap refuses and creates no Bootstrap cluster.
+#   6. without its kubeconfig, bootstrap refuses and creates no Bootstrap cluster;
+#   7. recover refuses while the Management cluster answers;
+#   8. a Management cluster only cut off from here (its kubeconfig points nowhere):
+#      recover stops at the datastore, which a live cluster writes to, and has
+#      started nothing;
+#   9. every machine container removed (the datastore survives): recover runs a
+#      Break-glass controller against the datastore and moves the objects into a new
+#      Bootstrap cluster; again, it runs nothing, and bootstrap is blocked meanwhile.
 #
 # Flux comes from the cluster's own definition. Step 3's gitops phase gives it its
 # credential; Flux then syncs a ConfigMap from a git server in a container, and
@@ -30,6 +37,7 @@ CFG=$DIR/management.yaml
 KC=$WORK/mgmt.kubeconfig
 DB=selfhostctl-e2e-db
 BOOT=selfhostctl-mgmt-bootstrap
+BG=selfhostctl-mgmt-break-glass
 GIT=selfhostctl-e2e-git
 
 log() { printf '\n=== %s: %s\n' "$(date -u +%H:%M:%S)" "$*"; }
@@ -38,7 +46,7 @@ k() { kubectl --kubeconfig "$KC" --request-timeout=20s "$@"; }
 
 clean() {
   set +e
-  docker rm -f -v "$BOOT" "$DB" "$GIT" >/dev/null 2>&1
+  docker rm -f -v "$BOOT" "$BG" "$DB" "$GIT" >/dev/null 2>&1
   docker ps -aq --filter label=io.x-k8s.kind.cluster=mgmt | xargs -r docker rm -f -v >/dev/null 2>&1
   rm -rf "$WORK"
 }
@@ -51,6 +59,15 @@ expect() {
 }
 
 bootstrap_exists() { docker container inspect "$BOOT" >/dev/null 2>&1; }
+
+# The Management cluster's machine containers; CAPD's load balancer isn't one.
+machine_containers() {
+  docker ps -a --filter label=io.x-k8s.kind.cluster=mgmt --format '{{.Names}} {{.Label "io.x-k8s.kind.role"}}' \
+    | awk '$2 != "external-load-balancer" {print $1}'
+}
+
+# kb runs kubectl inside the Bootstrap cluster's container.
+kb() { docker exec "$BOOT" k0s kubectl "$@"; }
 
 # git_server: an SSH git server on the kind network with one repo, fleet.git, whose
 # clusters/mgmt holds a ConfigMap. Writes the client key to E2E_FLUX_DEPLOY_KEY and
@@ -110,7 +127,6 @@ run() {
 
   E2E_ENCRYPTION_KEY=$(head -c 32 /dev/urandom | base64)
   export E2E_ENCRYPTION_KEY
-  export E2E_KINE_DATASOURCE="postgres://kine:kine-e2e@$DB:5432/kine?sslmode=disable"
   unset E2E_RECOVERY_BUNDLE
 
   log "PostgreSQL for kine"
@@ -118,6 +134,10 @@ run() {
   docker run -d --name "$DB" --network kind -e POSTGRES_USER=kine -e POSTGRES_PASSWORD=kine-e2e \
     -e POSTGRES_DB=kine postgres:17.6 >/dev/null
   until docker exec "$DB" pg_isready -U kine >/dev/null 2>&1; do sleep 2; done
+  # By address, not by name: recover also reads it from this host, outside Docker's DNS.
+  local db_ip
+  db_ip=$(docker inspect -f '{{(index .NetworkSettings.Networks "kind").IPAddress}}' "$DB")
+  export E2E_KINE_DATASOURCE="postgres://kine:kine-e2e@$db_ip:5432/kine?sslmode=disable"
 
   log "a git server for Flux"
   git_server
@@ -180,6 +200,46 @@ run() {
   mv "$KC.away" "$KC"
   out=$("$BIN" recovery export -f "$CFG")
   grep -q '"kind": "RecoveryBundle"' <<<"$out" || die "recovery export from the Management cluster failed"
+  E2E_RECOVERY_BUNDLE=$out
+  export E2E_RECOVERY_BUNDLE
+
+  log "7. recover while the Management cluster answers: nothing to recover"
+  expect 3 "$BIN" recover -f "$CFG"
+  ! bootstrap_exists || die "recover created a Bootstrap cluster next to a healthy Management cluster"
+
+  log "8. only cut off from here: recover stops at the datastore, having started nothing"
+  cp "$KC" "$KC.real"
+  sed -i.bak 's#server: https://.*#server: https://127.0.0.1:9#' "$KC"
+  code=0
+  out=$("$BIN" recover -f "$CFG" 2>&1) || code=$?
+  echo "$out"
+  [[ $code == 3 ]] || die "recover against a live, cut-off cluster exited $code, want 3"
+  grep -q 'datastore: blocked: the datastore shows a live cluster' <<<"$out" || die "recover didn't stop at the datastore"
+  mv "$KC.real" "$KC"
+  ! docker container inspect "$BG" >/dev/null 2>&1 || die "recover started a Break-glass controller on a live datastore"
+  ! bootstrap_exists || die "recover created a Bootstrap cluster next to a live Management cluster"
+
+  log "9. every machine removed: recover, through the Break-glass controller"
+  local c
+  for c in $(machine_containers); do docker rm -f -v "$c" >/dev/null; done
+  [[ -z $(machine_containers) ]] || die "machines left"
+  ! k get --raw /readyz >/dev/null 2>&1 || die "the Management cluster's API still answers"
+  "$BIN" recover -f "$CFG"
+  ! docker container inspect "$BG" >/dev/null 2>&1 || die "the Break-glass controller is still there"
+  kb -n mgmt get cluster mgmt >/dev/null || die "the Cluster isn't in the Bootstrap cluster"
+  kb -n mgmt get k0scontrolplanes,machines
+  # Not piped into grep -q: with pipefail, grep stopping at the first match fails the pipe.
+  local hooks
+  hooks=$(kb -n kube-system get configmap selfhostctl-recovery-webhooks -o jsonpath='{.data.webhooks\.json}')
+  grep -q '"kind": "ValidatingWebhookConfiguration"' <<<"$hooks" \
+    || { printf '%.3000s\n' "$hooks"; die "the providers' webhooks weren't saved"; }
+  out=$("$BIN" recover -f "$CFG")
+  echo "$out"
+  ! grep -q running <<<"$out" || die "a second recover ran a phase"
+  out=$("$BIN" status -f "$CFG")
+  echo "$out"
+  grep -q '^location: bootstrap, a Recovery is in progress$' <<<"$out" || die "status doesn't show the Recovery"
+  expect 3 "$BIN" bootstrap -f "$CFG"
 
   log "E2E PASSED"
 }
@@ -188,6 +248,15 @@ dump() {
   set +e
   echo "--- containers"
   docker ps -a
+  if docker container inspect "$BG" >/dev/null 2>&1; then
+    echo "--- break-glass"
+    docker logs --tail 50 "$BG"
+  fi
+  if bootstrap_exists; then
+    echo "--- bootstrap cluster"
+    kb get clusters,k0scontrolplanes,machines -A
+    kb get pods -A -o wide | grep -v Running
+  fi
   [[ -s $KC ]] || return
   k get clusters,k0scontrolplanes,machines -A
   k get nodes -o wide

@@ -22,21 +22,36 @@ func (s *stub) Name() string                                 { return s.name }
 func (s *stub) Status(context.Context) (phase.Status, error) { return s.st, nil }
 func (s *stub) Run(context.Context) error                    { s.st = phase.Status{State: phase.Done}; return nil }
 
+// testEnv is the operator's environment in these tests.
+var testEnv = map[string]string{
+	"FLUX_KEY":   "key",
+	"BUNDLE":     `{"apiVersion":"selfhostctl/v1alpha1","kind":"RecoveryBundle","endpoint":{"host":"10.0.0.1","port":6443}}`,
+	"KEY":        "a2V5",
+	"DATASOURCE": "postgres://kine",
+}
+
 func testApp(st phase.Status) app {
 	return app{
-		lookupEnv: func(k string) (string, bool) { return map[string]string{"FLUX_KEY": "key"}[k], k == "FLUX_KEY" },
+		lookupEnv: func(k string) (string, bool) { v, ok := testEnv[k]; return v, ok },
 		phases: func(*config.ManagementCluster, bool) ([]phase.Phase, func(), error) {
 			return []phase.Phase{&stub{name: "bootstrap-cluster", st: st}}, func() {}, nil
 		},
-		locate: func(context.Context, *config.ManagementCluster) (string, string, error) {
-			return "none", "", nil
+		locate: func(_ context.Context, cfg *config.ManagementCluster) (string, string, bool, error) {
+			// A config named "recovering" stands for a Recovery in progress.
+			if cfg.Metadata.Name == "recovering" {
+				return "bootstrap", "", true, nil
+			}
+			return "none", "", false, nil
+		},
+		recoverPhases: func(*config.ManagementCluster) ([]phase.Phase, func(), error) {
+			return []phase.Phase{&stub{name: "outage", st: st}}, func() {}, nil
 		},
 		adopt: func(context.Context, *config.ManagementCluster) error { return nil },
 		gitopsPhases: func(*config.ManagementCluster) ([]phase.Phase, func(), error) {
 			return []phase.Phase{&stub{name: "gitops", st: st}}, func() {}, nil
 		},
-		suspended: func(context.Context, *config.ManagementCluster) ([]string, error) {
-			return []string{"Kustomization apps/web"}, nil
+		warnings: func(context.Context, *config.ManagementCluster) ([]string, error) {
+			return []string{"Kustomization apps/web is suspended"}, nil
 		},
 		exportBundle: func(context.Context, *config.ManagementCluster) ([]byte, error) {
 			return []byte("{\"kind\": \"RecoveryBundle\"}\n"), nil
@@ -59,6 +74,8 @@ func configFile(t *testing.T, content string) string {
 }
 
 const validConfig = "apiVersion: selfhostctl/v1alpha1\nkind: ManagementCluster\nmetadata:\n  name: management\nproviders:\n  bootstrap: [{name: k0sproject-k0smotron, version: v2.3.0}]\n  controlPlane: [{name: k0sproject-k0smotron, version: v2.3.0}]\n  infrastructure: [{name: docker, version: v1.14.4}]\ncluster:\n  manifests: cluster.yaml\n  namespace: mgmt\n"
+
+const recoveryConfig = "recovery:\n  profile: k0smotron-kine\n  bundleFromEnv: BUNDLE\n  encryptionKeyFromEnv: KEY\n  kine: {datasourceFromEnv: DATASOURCE}\n"
 
 // gitopsConfig names a known_hosts file configFile writes anyway.
 const gitopsConfig = "gitops:\n  flux:\n    credentialSecret: {name: flux-git, namespace: flux-system, fromEnv: FLUX_KEY, knownHosts: cluster.yaml}\n"
@@ -90,6 +107,12 @@ func TestRun(t *testing.T) {
 		{name: "gitops sync", args: []string{"gitops", "sync", "-f", configFile(t, validConfig+gitopsConfig)}, st: phase.Status{State: phase.Next}, wantStdout: "gitops: running\ngitops: done\n"},
 		{name: "providers adopt", args: []string{"providers", "adopt", "-f", cfg}, wantStdout: "providers adopted\n"},
 		{name: "pivot starts at management-providers", args: []string{"pivot", "-f", cfg}, wantCode: exitUsage, wantStderr: `no phase "management-providers"`},
+		{name: "recover without recovery", args: []string{"recover", "-f", cfg}, wantCode: exitUsage, wantStderr: "recover needs recovery in the config"},
+		{name: "recover without its secrets", args: []string{"recover", "-f", configFile(t, validConfig+strings.Replace(recoveryConfig, "KEY", "UNSET_KEY", 1))},
+			wantCode: exitUsage, wantStderr: "empty or unset: UNSET_KEY. Load them for this one command, e.g. op run -- selfhostctl recover"},
+		{name: "recover runs", args: []string{"recover", "-f", configFile(t, validConfig+recoveryConfig)}, st: phase.Status{State: phase.Next}, wantStdout: "outage: running\noutage: done\n"},
+		{name: "status during a Recovery", args: []string{"status", "-f", configFile(t, strings.Replace(validConfig, "name: management", "name: recovering", 1))}, st: phase.Status{State: phase.Done},
+			wantStdout: "location: bootstrap, a Recovery is in progress\nwarning: Kustomization apps/web is suspended\noutage                    DONE\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

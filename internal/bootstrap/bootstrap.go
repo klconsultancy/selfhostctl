@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/klconsultancy/selfhostctl/internal/config"
+	"github.com/klconsultancy/selfhostctl/internal/datastore"
 	"github.com/klconsultancy/selfhostctl/internal/k0scontainer"
 	"github.com/klconsultancy/selfhostctl/internal/kube"
 	"github.com/klconsultancy/selfhostctl/internal/phase"
@@ -62,6 +63,13 @@ type Deps struct {
 	// GitOpsTimeout bounds each of the gitops phase's waits; GitOpsPoll is how often it
 	// looks.
 	GitOpsTimeout, GitOpsPoll time.Duration
+	// BreakGlassTimeout bounds the wait for the Break-glass controller's API.
+	BreakGlassTimeout time.Duration
+	// Revision reads the datastore's latest revision; datastore.Revision when nil.
+	Revision func(ctx context.Context, dataSource string) (int64, error)
+	// DatastoreQuiet is how long nothing may write to the datastore before recover
+	// starts anything on it.
+	DatastoreQuiet time.Duration
 }
 
 func (d *Deps) defaults() {
@@ -80,19 +88,27 @@ func (d *Deps) defaults() {
 	if d.Now == nil {
 		d.Now = time.Now
 	}
+	if d.Revision == nil {
+		d.Revision = datastore.Revision
+	}
+	if d.DatastoreQuiet == 0 {
+		d.DatastoreQuiet = time.Minute
+	}
 	if d.GitOpsTimeout == 0 {
 		d.GitOpsTimeout = 10 * time.Minute
 	}
 	if d.GitOpsPoll == 0 {
 		d.GitOpsPoll = 5 * time.Second
 	}
+	if d.BreakGlassTimeout == 0 {
+		d.BreakGlassTimeout = 5 * time.Minute
+	}
 }
 
 // Locate finds where the Management cluster's objects live now.
 func Locate(ctx context.Context, cfg *config.ManagementCluster, deps Deps) (Situation, error) {
 	deps.defaults()
-	l := &locator{cfg: cfg, cluster: BootstrapCluster(cfg, deps.Docker), clients: deps.Clients, probe: deps.Probe, now: deps.Now}
-	return l.get(ctx)
+	return newLocator(cfg, deps).get(ctx)
 }
 
 // PivotFrom is the first phase of `selfhostctl pivot`.
@@ -111,7 +127,7 @@ func LiveNodesReady(ctx context.Context, kubeconfig []byte) (bool, error) {
 func Phases(cfg *config.ManagementCluster, deps Deps) []phase.Phase {
 	deps.defaults()
 	cluster := BootstrapCluster(cfg, deps.Docker)
-	loc := &locator{cfg: cfg, cluster: cluster, clients: deps.Clients, probe: deps.Probe, now: deps.Now}
+	loc := newLocator(cfg, deps)
 
 	onManagement := func(name string) func(ctx context.Context) ([]byte, *phase.Status, error) {
 		return func(ctx context.Context) ([]byte, *phase.Status, error) {
@@ -170,7 +186,7 @@ func Phases(cfg *config.ManagementCluster, deps Deps) []phase.Phase {
 		&deleteBootstrapPhase{cfg: cfg, loc: loc, cluster: cluster, clients: deps.Clients, now: deps.Now},
 	}
 	for i, p := range phases {
-		phases[i] = tracked{p, loc}
+		phases[i] = tracked{notRecovering{p, loc}, loc}
 	}
 	return phases
 }
