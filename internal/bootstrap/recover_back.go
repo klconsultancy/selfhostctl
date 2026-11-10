@@ -234,7 +234,7 @@ func (p *infrastructurePhase) machines(ctx context.Context) (infrastructure.Mach
 	if err != nil {
 		return infrastructure.Machines{}, nil, err
 	}
-	m := infrastructure.Machines{Client: c, Namespace: p.cfg.Cluster.Namespace}
+	m := infrastructure.Machines{Client: c, Namespace: p.cfg.Cluster.Namespace, Cluster: p.cfg.ClusterName()}
 	for _, l := range left {
 		m.Names = append(m.Names, l.GetName())
 	}

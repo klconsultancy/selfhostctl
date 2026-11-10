@@ -92,6 +92,7 @@ func RecoverPhases(cfg *config.ManagementCluster, deps Deps) []phase.Phase {
 	deps.defaults()
 	loc := newLocator(cfg, deps)
 	cluster := BootstrapCluster(cfg, deps.Docker)
+	adapter := infrastructure.For(cfg.Infrastructure)
 	bg := breakGlassPhase{cfg: cfg, loc: loc, docker: deps.Docker, clients: deps.Clients, lookup: deps.Lookup, timeout: deps.BreakGlassTimeout}
 	phases := []phase.Phase{
 		&outagePhase{cfg: cfg, loc: loc},
@@ -101,6 +102,7 @@ func RecoverPhases(cfg *config.ManagementCluster, deps Deps) []phase.Phase {
 		newProvidersPhase(cfg, deps),
 		newBeforeApplyPhase(cfg, deps),
 		beforeMove{&bg, loc},
+		beforeMove{&infrastructureGonePhase{cfg: cfg, loc: loc, clients: deps.Clients, adapter: adapter}, loc},
 		beforeMove{&webhooksPhase{loc: loc, clients: deps.Clients}, loc},
 		beforeMove{&suspendPhase{tool: gitops.For(cfg.GitOps), loc: loc, clients: deps.Clients}, loc},
 		beforeMove{&pauseChildrenPhase{cfg: cfg, loc: loc, clients: deps.Clients}, loc},
@@ -108,7 +110,7 @@ func RecoverPhases(cfg *config.ManagementCluster, deps Deps) []phase.Phase {
 		&moveToBootstrapPhase{move: movePhase{cfg: cfg, loc: loc, installer: deps.Providers, mover: deps.Mover, clients: deps.Clients}},
 		&deleteBreakGlassPhase{loc: loc, container: bg.container(breakglass.Controller{})},
 		// The second half: new machines on the datastore, the move back, the finish.
-		beforeMoveBack{&infrastructurePhase{cfg: cfg, loc: loc, clients: deps.Clients, adapter: infrastructure.For(cfg.Infrastructure)}, loc},
+		beforeMoveBack{&infrastructurePhase{cfg: cfg, loc: loc, clients: deps.Clients, adapter: adapter}, loc},
 		beforeMoveBack{&replaceMachinesPhase{cfg: cfg, loc: loc, clients: deps.Clients, timeout: deps.MachinesTimeout}, loc},
 		beforeMoveBack{&readyPhase{cfg: cfg, cluster: cluster, clients: deps.Clients, timeout: deps.ClusterReadyTimeout}, loc},
 		moveToManagementPhase{&movePhase{cfg: cfg, loc: loc, installer: deps.Providers, mover: deps.Mover, clients: deps.Clients}},
@@ -252,6 +254,47 @@ func (p *outagePhase) Status(ctx context.Context) (phase.Status, error) {
 
 func (p *outagePhase) Run(context.Context) error {
 	return errors.New("the outage gate has nothing to run")
+}
+
+// --- infrastructure-gone ---
+
+// infrastructureGonePhase asks the Infrastructure adapter, through the Break-glass
+// controller, whether the old machines are really gone: a datastore cut off from them
+// looks the same to `datastore`.
+type infrastructureGonePhase struct {
+	cfg     *config.ManagementCluster
+	loc     *locator
+	clients Clients
+	adapter infrastructure.Adapter
+}
+
+func (p *infrastructureGonePhase) Name() string { return "infrastructure-gone" }
+
+func (p *infrastructureGonePhase) Status(ctx context.Context) (phase.Status, error) {
+	s, err := p.loc.get(ctx)
+	if err != nil {
+		return phase.Status{}, err
+	}
+	kc, blocked := breakGlassKubeconfig(s)
+	if blocked != nil {
+		return *blocked, nil
+	}
+	c, err := p.clients(kc)
+	if err != nil {
+		return phase.Status{}, err
+	}
+	names, err := clusterMachines(ctx, c, p.cfg)
+	if err != nil {
+		return phase.Status{}, err
+	}
+	if len(names) == 0 {
+		return phase.Status{State: phase.Done, Reason: "the Cluster has no Machines"}, nil
+	}
+	return p.adapter.Gone(ctx, infrastructure.Machines{Client: c, Namespace: p.cfg.Cluster.Namespace, Cluster: p.cfg.ClusterName(), Names: names})
+}
+
+func (p *infrastructureGonePhase) Run(context.Context) error {
+	return errors.New("the infrastructure-gone gate has nothing to run")
 }
 
 // --- host ---

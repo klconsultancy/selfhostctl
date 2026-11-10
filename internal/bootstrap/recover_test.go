@@ -480,7 +480,7 @@ func TestRecoverPhaseOrder(t *testing.T) {
 		names = append(names, p.Name())
 	}
 	want := []string{"outage", "datastore", "bootstrap-cluster", "host", "providers", "before-apply",
-		"break-glass", "webhooks", "suspend-gitops", "pause-children", "delete-nodes", "move-to-bootstrap", "delete-break-glass",
+		"break-glass", "infrastructure-gone", "webhooks", "suspend-gitops", "pause-children", "delete-nodes", "move-to-bootstrap", "delete-break-glass",
 		"infrastructure", "replace-machines", "ready", "move-to-management",
 		"restore-webhooks", "leftovers", "resume-gitops", "unpause-children", "delete-bootstrap-cluster"}
 	if !slices.Equal(names, want) {

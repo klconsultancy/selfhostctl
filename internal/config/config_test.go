@@ -80,8 +80,8 @@ func TestParseRejects(t *testing.T) {
 		},
 		{
 			name: "an unknown Infrastructure adapter",
-			yaml: valid + "infrastructure: {adapter: capmox}\n",
-			want: []string{`infrastructure.adapter: "capmox": the adapters are none`},
+			yaml: valid + "infrastructure: {adapter: vsphere}\n",
+			want: []string{`infrastructure.adapter: "vsphere": the adapters are none, capmox`},
 		},
 		{
 			name: "gitops without flux",
