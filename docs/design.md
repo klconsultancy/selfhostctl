@@ -205,15 +205,15 @@ Agreed 2026-11-09, for #11 and #12. Profile `k0smotron-kine`.
 | Deleting a VM, CAPMOX asks one node first: `status.proxmoxNode`, else the node it cloned from. Unreachable → the deletion hangs. Then it checks the VMID cluster-wide: free → done | `infrastructure` points an old ProxmoxMachine whose node is unset or not online at the first online node; one already online is kept |
 | A moved ProxmoxMachine with a VMID is never cloned again. If Proxmox still has the VM, on any node, CAPMOX takes it over and starts it | `infrastructure-gone` blocks while any old VM exists, running or not: start them, or destroy them to recover |
 | Proxmox reuses a freed VMID | an old VMID held by a VM with another name blocks too: CAPMOX would take it over and delete it |
-| CAPMOX's credentials: the Secret in `spec.credentialsRef` (`url`, `token`, `secret`, `insecure`, `root_ca`), which moves with the cluster | the adapter reads Proxmox with that Secret: no environment variables |
+| CAPMOX's credentials: the Secret in `spec.credentialsRef` (`url`, `token`, `secret`, `insecure`, `root_ca`), which moves with the cluster. `insecure` unset means CAPMOX doesn't check the certificate | the adapter reads Proxmox with that Secret: no environment variables |
 
 | Decision | Choice |
 | --- | --- |
 | Config | `infrastructure: {adapter: capmox}`, nothing else |
-| Proxmox API | GETs only (`cluster/resources?type=vm`, `nodes`), with a plain HTTP client: a read-only token is enough. Deleting VMs stays CAPMOX's job |
-| TLS | CAPMOX's rule: `insecure` unset or true-ish → no certificate check; `root_ca` added to the system roots |
+| Proxmox API | GETs only (`cluster/resources?type=vm`, `nodes`), with a plain HTTP client. Deleting VMs stays CAPMOX's job. The token is CAPMOX's own, which may destroy VMs, and it now leaves the operator's host |
+| TLS | the certificate is checked (system roots plus `root_ca`) unless `insecure` is explicitly true-ish. Unlike CAPMOX, unset means checked: the token crosses the operator's network. A failed check blocks: add `root_ca`, or set `insecure: "true"` knowingly |
 | Blocked | no `credentialsRef`, its Secret missing or incomplete, the API not answering, no node online, or an old VM still there |
 | Skipped | ProxmoxMachines without `virtualMachineID`: they never had a VM |
 | Tests | against a fake Proxmox API; no e2e (CI has no Proxmox). The first real run is a planned exercise on a real cluster |
-| Not chosen | the node of the Machine's failure domain (a zone has several nodes, and the dead one may be among them); an outage check in `datastore` (it runs before the machines' objects are readable) |
+| Not chosen | a separate read-only token from the environment (more config for a rare run; the certificate check covers interception); CAPMOX's TLS rule (unset = unchecked); the node of the Machine's failure domain (a zone has several nodes, and the dead one may be among them); an outage check in `datastore` (it runs before the machines' objects are readable) |
 

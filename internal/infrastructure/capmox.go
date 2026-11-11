@@ -2,6 +2,7 @@ package infrastructure
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -46,6 +47,7 @@ type oldVM struct {
 type capmoxView struct {
 	api      *proxmoxAPI
 	apiURL   string
+	secret   string
 	cluster  *unstructured.Unstructured
 	zoned    bool
 	machines []oldVM
@@ -97,7 +99,7 @@ func (capmox) look(ctx context.Context, m Machines) (*capmoxView, *phase.Status,
 	if err != nil {
 		return nil, blocked("the Proxmox credentials Secret %s/%s: %v", ns, ref["name"], err), nil
 	}
-	v := &capmoxView{api: api, apiURL: string(secret.Data["url"]), cluster: cluster, zoned: len(zones) > 0}
+	v := &capmoxView{api: api, apiURL: string(secret.Data["url"]), secret: ns + "/" + ref["name"], cluster: cluster, zoned: len(zones) > 0}
 	for _, n := range m.Names {
 		vm, err := oldMachineVM(ctx, m.Client, m.Namespace, n)
 		if err != nil {
@@ -160,7 +162,7 @@ func int64Field(u *unstructured.Unstructured, fields ...string) (int64, bool) {
 func (v *capmoxView) alive(ctx context.Context) (*phase.Status, error) {
 	vms, err := v.api.vms(ctx)
 	if err != nil {
-		return blocked("the Proxmox API at %s doesn't answer: %v", v.apiURL, err), nil
+		return v.unreachable(err), nil
 	}
 	byID := map[int64]proxmoxVM{}
 	for _, vm := range vms {
@@ -192,6 +194,14 @@ func (v *capmoxView) alive(ctx context.Context) (*phase.Status, error) {
 		return nil, nil
 	}
 	return &phase.Status{State: phase.Blocked, Reason: strings.Join(reasons, ". ")}, nil
+}
+
+// unreachable is the Blocked status for a failed Proxmox API call.
+func (v *capmoxView) unreachable(err error) *phase.Status {
+	if errors.As(err, new(*tls.CertificateVerificationError)) {
+		return blocked("the Proxmox certificate at %s doesn't verify (%v): add its CA as root_ca to Secret %s, or set insecure: \"true\" there knowingly; the token it holds can destroy VMs", v.apiURL, err, v.secret)
+	}
+	return blocked("the Proxmox API at %s doesn't answer: %v", v.apiURL, err)
 }
 
 // stale are the old VMs whose node CAPMOX can't ask: none, or one not online.
@@ -254,7 +264,7 @@ func (a capmox) Status(ctx context.Context, m Machines) (phase.Status, error) {
 	}
 	online, err := v.api.onlineNodes(ctx)
 	if err != nil {
-		return *blocked("the Proxmox API at %s doesn't answer: %v", v.apiURL, err), nil
+		return *v.unreachable(err), nil
 	}
 	stale := v.stale(online)
 	if len(stale) > 0 && len(online) == 0 {
@@ -289,7 +299,7 @@ func (a capmox) Run(ctx context.Context, m Machines) error {
 	}
 	online, err := v.api.onlineNodes(ctx)
 	if err != nil {
-		return fmt.Errorf("the Proxmox API at %s: %w", v.apiURL, err)
+		return errors.New(v.unreachable(err).Reason)
 	}
 	if stale := v.stale(online); len(stale) > 0 {
 		if len(online) == 0 {

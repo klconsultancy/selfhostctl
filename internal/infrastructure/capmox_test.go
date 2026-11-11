@@ -80,7 +80,7 @@ func newCapmoxWorld(t *testing.T) *capmoxWorld {
 	}}
 	w.srv = w.proxmox.serve(t)
 	w.url = w.srv.URL
-	w.secret = map[string][]byte{"url": []byte(w.url), "token": []byte("capmox@pve!capi"), "secret": []byte("s3cret")}
+	w.secret = map[string][]byte{"url": []byte(w.url), "token": []byte("capmox@pve!capi"), "secret": []byte("s3cret"), "insecure": []byte("true")}
 	return w
 }
 
@@ -157,7 +157,8 @@ func TestCapmoxGone(t *testing.T) {
 		{"no credentialsRef", func(w *capmoxWorld) { w.noCreds = true }, phase.Blocked, "has no spec.credentialsRef"},
 		{"a credential missing", func(w *capmoxWorld) { delete(w.secret, "token") }, phase.Blocked, "empty or unset: token"},
 		{"the wrong token", func(w *capmoxWorld) { w.secret["secret"] = []byte("wrong") }, phase.Blocked, "doesn't answer: GET /cluster/resources: 401"},
-		{"certificates checked", func(w *capmoxWorld) { w.secret["insecure"] = []byte("false") }, phase.Blocked, "certificate"},
+		{"insecure unset: checked", func(w *capmoxWorld) { delete(w.secret, "insecure") }, phase.Blocked, "add its CA as root_ca to Secret mgmt/proxmox-creds"},
+		{"insecure false: checked", func(w *capmoxWorld) { w.secret["insecure"] = []byte("false") }, phase.Blocked, "doesn't verify"},
 		{"a root CA", func(w *capmoxWorld) {
 			w.secret["insecure"] = []byte("false")
 			w.secret["root_ca"] = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: w.srv.Certificate().Raw})

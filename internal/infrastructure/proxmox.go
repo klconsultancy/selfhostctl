@@ -23,7 +23,8 @@ type proxmoxAPI struct {
 }
 
 // newProxmoxAPI reads the keys of a CAPMOX credentials Secret: url, token, secret,
-// and, as CAPMOX does, insecure (unset: no certificate check) and root_ca.
+// root_ca and insecure. Unlike CAPMOX, an unset insecure means the certificate is
+// checked: CAPMOX's token, which may destroy VMs, leaves the operator's host here.
 func newProxmoxAPI(data map[string][]byte) (*proxmoxAPI, error) {
 	var missing []string
 	for _, k := range []string{"url", "token", "secret"} {
@@ -41,8 +42,8 @@ func newProxmoxAPI(data map[string][]byte) (*proxmoxAPI, error) {
 	insecure, set := data["insecure"]
 	tlsConfig := &tls.Config{
 		MinVersion: tls.VersionTLS12,
-		// CAPMOX's rule, so the tool reaches Proxmox exactly when CAPMOX does.
-		InsecureSkipVerify: !set || slices.Contains([]string{"1", "on", "true", "yes", "y"}, strings.ToLower(string(insecure))), //nolint:gosec // CAPMOX's own rule for its Secret
+		// Only when the Secret says so, in CAPMOX's true-ish values.
+		InsecureSkipVerify: set && slices.Contains([]string{"1", "on", "true", "yes", "y"}, strings.ToLower(string(insecure))), //nolint:gosec // the operator's explicit choice in the Secret
 	}
 	if ca := data["root_ca"]; len(ca) > 0 {
 		pool, err := x509.SystemCertPool()
