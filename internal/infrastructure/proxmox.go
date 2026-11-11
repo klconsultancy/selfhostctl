@@ -67,7 +67,7 @@ type proxmoxVM struct {
 	VMID int64  `json:"vmid"`
 	Name string `json:"name"`
 	Node string `json:"node"`
-	// Status is running or stopped.
+	// Status is running or stopped; unknown on a node that isn't online.
 	Status string `json:"status"`
 }
 
