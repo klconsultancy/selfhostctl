@@ -4,6 +4,7 @@
 selfhostctl bootstrap       -f management.yaml [--from <phase>] [--first]
 selfhostctl pivot           -f management.yaml
 selfhostctl recover         -f management.yaml [--from <phase>]   # with the Recovery bundle, e.g. via op run
+selfhostctl upgrade         -f management.yaml
 selfhostctl status          -f management.yaml
 selfhostctl providers adopt -f management.yaml
 selfhostctl gitops sync     -f management.yaml
@@ -58,7 +59,7 @@ The config is described in [config.md](config.md). Terms such as Phase, Manual c
 | `ready` | The Cluster is `ControlPlaneAvailable`, its control plane has as many ready replicas as it wants, and every Machine is `NodeHealthy`. Running waits up to 30 minutes. `status` says what it still waits for. |
 | `recovery-bundle` | **A Manual checkpoint.** The Recovery bundle in `recovery.bundleFromEnv` matches the cluster: the same CA, service-account key, front-proxy CA and endpoint, each private key belonging to its certificate. The variables `recovery.encryptionKeyFromEnv` and `recovery.kine.datasourceFromEnv` name are set too. Until then, the command stops with exit 4 and tells you to run `recovery export`. It warns when no `beforeApply` file uses the encryption-key variable. It is done right away when the config has no `recovery`. |
 | `kubeconfig` | `cluster.kubeconfig` (mode 0600) equals Cluster API's `<cluster>-kubeconfig` Secret: from the Bootstrap cluster before the pivot, from the Management cluster after it. So it follows a renewed certificate. The note shows its expiry, with a warning within 30 days. |
-| `management-providers` | The Management cluster runs exactly the declared providers, with the declared variables. Providers without a selfhostctl fingerprint: **manual**, `providers adopt`. Other versions: blocked. |
+| `management-providers` | The Management cluster runs exactly the declared providers, with the declared variables. Providers without a selfhostctl fingerprint: **manual**, `providers adopt`. Other versions or variables: blocked, run `upgrade`. |
 | `management-before-apply` | The `beforeApply` entries for `management` are in place on the Management cluster. |
 | `move` | The Cluster's namespace is on the Management cluster, unpaused. **Gates:** the providers match on both sides (versions and fingerprints; an unstamped side is **manual**, `providers adopt`), and the namespace holds no other Cluster. Running does a dry run, then the move. A move that stopped halfway (`split`) resumes, and a move that ended before unpausing is unpaused. |
 | `after-pivot` | The `afterPivot` entries are in place on the Management cluster. |
@@ -89,7 +90,7 @@ While a Recovery is in progress (the Break-glass controller's container exists, 
 | `infrastructure` | The Infrastructure adapter (`infrastructure.adapter`) has readied the old Machines' infrastructure. `capmox`: every old ProxmoxMachine names a Proxmox node that is online, so CAPMOX can tell its VM is gone, and, with zones, the Cluster shows its failure domains (waited for up to 10 minutes). Blocked without `spec.credentialsRef` on the ProxmoxCluster, when the Proxmox certificate doesn't verify (add `root_ca` to that Secret, or set `insecure: "true"`), or with no node online. `none`, the default: done. |
 | `replace-machines` | The Cluster's Machines from before (recorded by name in the recovery ConfigMap, key `machines.json`) are gone: deleted without drain, volume wait or k0smotron's `kcp-cleanup` hook, since their nodes are gone. Another lifecycle hook on one of them blocks, before any is deleted: do or skip its cleanup, remove the annotation, run again. The control plane creates new ones, which come up on the datastore. |
 | `ready` | As in `bootstrap`, on the Bootstrap cluster: the new machines are healthy. |
-| `move-to-management` | The Cluster's namespace is back in the Management cluster, unpaused. The pivot's gates; with providers that differ, upgrade the Management cluster's first. |
+| `move-to-management` | The Cluster's namespace is back in the Management cluster, unpaused. The pivot's gates; with providers that differ, run `upgrade` (it runs at this step of a Recovery), then `recover` again. |
 | `restore-webhooks` | The saved webhook configurations are in the Management cluster again. |
 | `leftovers` | The Break-glass controller's and the old machines' autopilot `ControlNode`s and `kube-node-lease` leases are gone. |
 | `resume-gitops` | What `suspend-gitops` suspended is resumed, the root last. |
@@ -97,6 +98,17 @@ While a Recovery is in progress (the Break-glass controller's container exists, 
 | `delete-bootstrap-cluster` | As in `bootstrap`: after the stable window, the Bootstrap cluster is deleted. Until then, exit 4: run again. That ends the Recovery. |
 
 The phases from `break-glass` to `delete-nodes` are done ("moved") once the objects are in the Bootstrap cluster; `infrastructure` to `ready` once they are back in the Management cluster. After the Recovery, `recover` finds nothing to recover (exit 3).
+
+## upgrade
+
+`upgrade` brings the live Management cluster's providers to the config's versions and `providers.variables`, through clusterctl. The core is always this release's (README, support matrix).
+
+| Phase | Done when |
+| --- | --- |
+| `management` | The Management cluster manages itself and answers through `cluster.kubeconfig`. Otherwise blocked: finish `bootstrap` first. During a Recovery only at the step where `move-to-management` asks for it: the objects wait in the Bootstrap cluster and the new machines answer; otherwise blocked. |
+| `providers` | Every declared provider is installed at its version, with the config's variables (fingerprint). Its reason lists them. When it runs, its reason is the plan: each provider that goes to another version, or is installed again because a variable changed (then every provider is). clusterctl also brings cert-manager to the version it ships. Blocked: a declared provider that isn't installed or an installed one that isn't declared (upgrade adds and removes nothing), a core newer than this release's (use the release for that Cluster API minor), or one more than 3 minors behind (upgrade through a release in between). Providers without a fingerprint at the config's versions: **manual**, `providers adopt`. |
+
+A second `upgrade` does nothing.
 
 ## Exit codes
 

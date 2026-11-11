@@ -370,7 +370,7 @@ func (p moveToManagementPhase) Name() string { return "move-to-management" }
 func (p moveToManagementPhase) Status(ctx context.Context) (phase.Status, error) {
 	st, err := p.movePhase.Status(ctx)
 	if err == nil && st.State == phase.Blocked && strings.HasPrefix(st.Reason, "the providers differ") {
-		st.Reason += ". Upgrade the Management cluster's providers to the config's first, then run again"
+		st.Reason += ". Run `selfhostctl upgrade -f <config>` to bring the Management cluster's to the config's, then run recover again"
 	}
 	return st, err
 }

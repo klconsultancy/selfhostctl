@@ -129,7 +129,7 @@ func (p *managementProvidersPhase) Status(ctx context.Context) (phase.Status, er
 	case providers.Unstamped(p.wanted, installed):
 		return phase.Status{State: phase.Manual, Reason: "the Management cluster's providers carry no selfhostctl fingerprint: " + adoptInstruction}, nil
 	}
-	return phase.Status{State: phase.Blocked, Reason: "the Management cluster's providers differ from the config: " + providers.Summary(diffs) + ". Bring them to the config's versions first"}, nil
+	return phase.Status{State: phase.Blocked, Reason: "the Management cluster's providers differ from the config: " + providers.Summary(diffs) + ". Run `selfhostctl upgrade -f <config>`, then run again"}, nil
 }
 
 func (p *managementProvidersPhase) Run(ctx context.Context) error {

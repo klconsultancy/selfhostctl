@@ -89,6 +89,31 @@ Agreed 2026-11-08, for #9 onwards.
 
 **#9 adds:** the e2e runs `bootstrap` after the pivot (nothing runs, no Bootstrap cluster appears) and without the kubeconfig (blocked). `recovery export` also works from the Management cluster.
 
+## Upgrade
+
+Agreed 2026-11-11, for #14. Against clusterctl v1.14.4.
+
+| Fact | Consequence |
+| --- | --- |
+| `ApplyUpgrade` with explicit `name:version` (a custom plan) installs each named provider again, also at the same version: components deleted, CRDs and inventory kept | the way a changed variable reaches a provider |
+| `ApplyUpgrade` first brings cert-manager to the version clusterctl ships | the plan says so |
+| clusterctl refuses a core that skips more than 3 minors, or a target outside its contract | checked before, with a clearer reason |
+| `PlanUpgrade` lists the newest versions per contract, not the config's | not used: the plan is the tool's own |
+| The fingerprint (#6) covers all variables together | a changed variable installs every provider again |
+
+| Decision | Choice |
+| --- | --- |
+| Phases | `management` (the Management cluster manages itself and answers), `providers` (Status shows the plan, Run applies it) |
+| During a Recovery | only once the Break-glass controller is gone, the objects wait in the Bootstrap cluster and the Management cluster's new machines answer: `move-to-management` blocks on providers that differ (a config bumped before the outage; the datastore holds the old ones) and says to run `upgrade`. No Cluster is on the Management cluster then. Otherwise blocked. Not chosen: setting the config back to the old versions (recover on old providers, upgrade after) |
+| Handle | the config's kubeconfig, as for every command after the pivot. No `--kubeconfig` flag |
+| Steps | each provider whose version or fingerprint differs, at the config's version. A provider without a fingerprint is reinstalled too when there are other steps; alone, it is **manual**: `providers adopt` (#9) |
+| After | every provider stamped with the config's fingerprint; the phase is done with the versions now installed. A second run does nothing |
+| Blocked | a declared provider not installed (upgrade installs nothing new), an installed one not declared (it removes nothing), a core newer than this release's ("use the selfhostctl release for Cluster API vX.Y"), a core more than 3 minors behind ("upgrade through a release in between") |
+| Core | always this release's (`support.CAPIVersion`). The reason names the minor, not a release: this binary can't know later releases. The README's support matrix maps one to the other |
+| Output | a phase that runs shows its reason: `providers: running (<plan>)`, for every command |
+| Tests | the plan and its blocks against fakes; integration against a k0s container and clusterctl's real releases (CAPD v1.14.3 → v1.14.4 with the ClusterTopology gate turned on); no e2e step |
+| Not chosen | a fingerprint per provider over the variables its components use (changes #6 and the move gate); adding or deleting providers (destructive, or a step of its own later) |
+
 ## GitOps
 
 Agreed 2026-11-09, for #10.
@@ -190,7 +215,7 @@ Agreed 2026-11-09, for #11 and #12. Profile `k0smotron-kine`.
 | Deleting them | control plane and workers at once: the annotations above, `pre-terminate.delete.hook.machine.cluster.x-k8s.io/kcp-cleanup` removed, then deleted, waited for (10 min) |
 | Other lifecycle hooks | any other `pre-drain.delete.hook…` or `pre-terminate.delete.hook…` on an old Machine blocks, naming it, before any Machine is deleted: its owner's cleanup is the operator's call. Not chosen: removing every hook (an unknown owner's cleanup would be skipped silently) |
 | `ready` | the pivot's condition (#8), on the Bootstrap cluster |
-| Back | the pivot's move and gates, Bootstrap cluster → Management cluster. Providers that differ: upgrade the Management cluster's first |
+| Back | the pivot's move and gates, Bootstrap cluster → Management cluster. Providers that differ: run `upgrade`, which runs at this step (#14), then `recover` again |
 | Webhooks | the saved ones created again where missing |
 | Leftovers | for the Break-glass controller and every old Machine: its autopilot `ControlNode` and its leases `kube-node-lease/k0s-ctrl-<name>` and `<name>`, which the removed hook would have deleted |
 | GitOps | through the seam: what `suspend-gitops` marked, resumed, the root last |

@@ -58,6 +58,8 @@ type app struct {
 	locate func(ctx context.Context, cfg *config.ManagementCluster) (location, why string, recovering bool, err error)
 	// recoverPhases returns recover's phases for a config.
 	recoverPhases func(cfg *config.ManagementCluster) ([]phase.Phase, func(), error)
+	// upgradePhases returns upgrade's phases for a config.
+	upgradePhases func(cfg *config.ManagementCluster) ([]phase.Phase, func(), error)
 	// exportBundle reads the Recovery bundle from wherever the cluster's objects are.
 	exportBundle func(ctx context.Context, cfg *config.ManagementCluster) ([]byte, error)
 	// adopt stamps the Management cluster's providers with the config's fingerprint.
@@ -81,6 +83,7 @@ func liveDeps(cfg *config.ManagementCluster, first bool) (bootstrap.Deps, func()
 		Docker:        docker,
 		NodesReady:    bootstrap.LiveNodesReady,
 		Providers:     cc,
+		Upgrader:      cc,
 		Mover:         cc,
 		Prerequisites: beforeapply.Applier{Config: cfg, Lookup: os.LookupEnv},
 		First:         first,
@@ -112,6 +115,13 @@ func liveApp() app {
 				return nil, nil, err
 			}
 			return bootstrap.RecoverPhases(cfg, deps), done, nil
+		},
+		upgradePhases: func(cfg *config.ManagementCluster) ([]phase.Phase, func(), error) {
+			deps, done, err := liveDeps(cfg, false)
+			if err != nil {
+				return nil, nil, err
+			}
+			return bootstrap.UpgradePhases(cfg, deps), done, nil
 		},
 		exportBundle: func(ctx context.Context, cfg *config.ManagementCluster) ([]byte, error) {
 			deps, done, err := liveDeps(cfg, false)
@@ -357,6 +367,28 @@ func newRoot(a app, stdout io.Writer) *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runPhases(cmd, bootstrap.PivotFrom, false)
+		},
+	})
+
+	root.AddCommand(&cobra.Command{
+		Use:   "upgrade",
+		Short: "Bring the Management cluster's providers to the config's versions and variables",
+		Long: "Against the live Management cluster, once it manages itself. Shows the plan (each\n" +
+			"provider that changes, and why), then upgrades those through clusterctl, which also\n" +
+			"brings cert-manager to the version it ships. A changed providers.variables entry\n" +
+			"installs every provider again. Nothing to change: nothing is done.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg, err := load()
+			if err != nil {
+				return classify(err)
+			}
+			phases, done, err := a.upgradePhases(cfg)
+			if err != nil {
+				return classify(err)
+			}
+			defer done()
+			return classify(phase.Run(cmd.Context(), phases, "", stdout))
 		},
 	})
 

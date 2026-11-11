@@ -94,7 +94,11 @@ func Run(ctx context.Context, phases []Phase, from string, out io.Writer) error 
 			return fmt.Errorf("%s: %w", p.Name(), err)
 		}
 		if st.State == Next {
-			_, _ = fmt.Fprintf(out, "%s: running\n", p.Name())
+			if st.Reason != "" {
+				_, _ = fmt.Fprintf(out, "%s: running (%s)\n", p.Name(), st.Reason)
+			} else {
+				_, _ = fmt.Fprintf(out, "%s: running\n", p.Name())
+			}
 			if err := p.Run(ctx); err != nil {
 				return fmt.Errorf("%s: %w", p.Name(), err)
 			}

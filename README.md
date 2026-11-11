@@ -10,7 +10,7 @@
 
 One Go binary for the lifecycle of a self-managed [Cluster API](https://cluster-api.sigs.k8s.io) management cluster: bootstrap through a kind **Bootstrap cluster**, pivot, provider upgrade, recovery and status, driven by one declarative config file.
 
-> **Status: early development.** `bootstrap` brings a Management cluster up through its Bootstrap cluster until it manages itself, and gives Flux its credential. `recover` brings it back when its machines are gone. Provider upgrade comes next. The design is the [PRD](https://github.com/klconsultancy/selfhostctl/issues/1). See [the command line](docs/cli.md) and [the config](docs/config.md).
+> **Status: early development.** `bootstrap` brings a Management cluster up through its Bootstrap cluster until it manages itself, and gives Flux its credential. `recover` brings it back when its machines are gone. `upgrade` brings its providers to the config's versions and feature gates. The design is the [PRD](https://github.com/klconsultancy/selfhostctl/issues/1). See [the command line](docs/cli.md) and [the config](docs/config.md).
 
 ## Scope
 
