@@ -168,11 +168,17 @@ func (v *capmoxView) alive(ctx context.Context) (*phase.Status, error) {
 	for _, vm := range vms {
 		byID[vm.VMID] = vm
 	}
-	var still, taken []string
+	online, err := v.api.onlineNodes(ctx)
+	if err != nil {
+		return v.unreachable(err), nil
+	}
+	var still, offline, taken []string
 	for _, m := range v.machines {
 		vm, ok := byID[m.vmid]
 		switch {
 		case !ok:
+		case vm.Name == m.obj.GetName() && !slices.Contains(online, vm.Node):
+			offline = append(offline, fmt.Sprintf("VM %d (%s) on %s", vm.VMID, vm.Name, vm.Node))
 		case vm.Name == m.obj.GetName():
 			still = append(still, fmt.Sprintf("VM %d (%s) on %s, %s", vm.VMID, vm.Name, vm.Node, vm.Status))
 		default:
@@ -184,6 +190,11 @@ func (v *capmoxView) alive(ctx context.Context) (*phase.Status, error) {
 		reasons = append(reasons, fmt.Sprintf(
 			"the old machines' VMs still exist: %s. Start them and the cluster may come back by itself; to recover, destroy them in Proxmox first",
 			strings.Join(still, "; ")))
+	}
+	if len(offline) > 0 {
+		reasons = append(reasons, fmt.Sprintf(
+			"the old machines' VMs are on nodes that aren't online, which Proxmox can't ask to destroy them: %s. Bring the node back and start or destroy them there; if it is gone for good, move each VM's config to an online node and destroy it there, or remove the config",
+			strings.Join(offline, "; ")))
 	}
 	if len(taken) > 0 {
 		reasons = append(reasons, fmt.Sprintf(
@@ -236,7 +247,8 @@ func (v *capmoxView) failureDomainsShown() bool {
 }
 
 // Gone blocks while Proxmox still has an old machine's VM, running or not: CAPMOX
-// would find it and start it again once the objects move.
+// would find it and start it again once the objects move. A VM on a node that isn't
+// online stays listed, its status unknown, and gets its own reason.
 func (a capmox) Gone(ctx context.Context, m Machines) (phase.Status, error) {
 	v, b, err := a.look(ctx, m)
 	if err != nil || b != nil {

@@ -145,8 +145,11 @@ func TestCapmoxGone(t *testing.T) {
 	}{
 		{"the VM is gone", func(*capmoxWorld) {}, phase.Done, "VMs are gone from Proxmox (1)"},
 		{"the VM still exists", func(w *capmoxWorld) {
-			w.proxmox.vms = []proxmoxVM{{VMID: 101, Name: "mgmt-old-1", Node: "pve1", Status: "stopped"}}
-		}, phase.Blocked, "VM 101 (mgmt-old-1) on pve1, stopped. Start them"},
+			w.proxmox.vms = []proxmoxVM{{VMID: 101, Name: "mgmt-old-1", Node: "pve2", Status: "stopped"}}
+		}, phase.Blocked, "VM 101 (mgmt-old-1) on pve2, stopped. Start them"},
+		{"the VM is on a node that is offline", func(w *capmoxWorld) {
+			w.proxmox.vms = []proxmoxVM{{VMID: 101, Name: "mgmt-old-1", Node: "pve1", Status: "unknown"}}
+		}, phase.Blocked, "on nodes that aren't online, which Proxmox can't ask to destroy them: VM 101 (mgmt-old-1) on pve1. Bring the node back"},
 		{"another VM took its VMID", func(w *capmoxWorld) {
 			w.proxmox.vms = []proxmoxVM{{VMID: 101, Name: "other", Node: "pve2", Status: "running"}}
 		}, phase.Blocked, `VMID 101 of ProxmoxMachine mgmt-old-1 is now VM "other" on pve2`},
@@ -223,7 +226,7 @@ func TestCapmoxStatusBlocks(t *testing.T) {
 	}{
 		{"no node online", func(w *capmoxWorld) { w.proxmox.nodes = []proxmoxNode{{Node: "pve1", Status: "offline"}} }, "no Proxmox node is online"},
 		{"the VM came back", func(w *capmoxWorld) {
-			w.proxmox.vms = []proxmoxVM{{VMID: 101, Name: "mgmt-old-1", Node: "pve1", Status: "running"}}
+			w.proxmox.vms = []proxmoxVM{{VMID: 101, Name: "mgmt-old-1", Node: "pve2", Status: "running"}}
 		}, "VMs still exist"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
