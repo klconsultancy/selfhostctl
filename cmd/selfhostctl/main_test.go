@@ -47,6 +47,9 @@ func testApp(st phase.Status) app {
 			return []phase.Phase{&stub{name: "outage", st: st}}, func() {}, nil
 		},
 		adopt: func(context.Context, *config.ManagementCluster) error { return nil },
+		upgradePhases: func(*config.ManagementCluster) ([]phase.Phase, func(), error) {
+			return []phase.Phase{&stub{name: "providers", st: st}}, func() {}, nil
+		},
 		gitopsPhases: func(*config.ManagementCluster) ([]phase.Phase, func(), error) {
 			return []phase.Phase{&stub{name: "gitops", st: st}}, func() {}, nil
 		},
@@ -105,6 +108,9 @@ func TestRun(t *testing.T) {
 		{name: "status", args: []string{"status", "-f", cfg}, st: phase.Status{State: phase.Next}, wantStdout: "location: none\nwarning: Kustomization apps/web is suspended\nbootstrap-cluster         NEXT\n"},
 		{name: "gitops sync without gitops", args: []string{"gitops", "sync", "-f", cfg}, wantCode: exitUsage, wantStderr: "the config has no gitops"},
 		{name: "gitops sync", args: []string{"gitops", "sync", "-f", configFile(t, validConfig+gitopsConfig)}, st: phase.Status{State: phase.Next}, wantStdout: "gitops: running\ngitops: done\n"},
+		{name: "upgrade runs", args: []string{"upgrade", "-f", cfg}, st: phase.Status{State: phase.Next, Reason: "infrastructure-docker v1.14.3 → v1.14.4"},
+			wantStdout: "providers: running (infrastructure-docker v1.14.3 → v1.14.4)\nproviders: done\n"},
+		{name: "upgrade blocked", args: []string{"upgrade", "-f", cfg}, st: phase.Status{State: phase.Blocked, Reason: "a provider is missing"}, wantCode: exitBlocked, wantStderr: "blocked: a provider is missing"},
 		{name: "providers adopt", args: []string{"providers", "adopt", "-f", cfg}, wantStdout: "providers adopted\n"},
 		{name: "pivot starts at management-providers", args: []string{"pivot", "-f", cfg}, wantCode: exitUsage, wantStderr: `no phase "management-providers"`},
 		{name: "recover without recovery", args: []string{"recover", "-f", cfg}, wantCode: exitUsage, wantStderr: "recover needs recovery in the config"},

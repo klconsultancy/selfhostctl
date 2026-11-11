@@ -43,6 +43,9 @@ type Deps struct {
 	// Providers reads and installs the Cluster API providers;
 	// providers.Clusterctl outside tests.
 	Providers providers.Installer
+	// Upgrader upgrades the Management cluster's providers; providers.Clusterctl
+	// outside tests.
+	Upgrader providers.Upgrader
 	// Prerequisites judges and installs the beforeApply entries.
 	Prerequisites Prerequisites
 	// Clients turns a kubeconfig into a client; LiveClients when nil.

@@ -48,17 +48,11 @@ func (c Clusterctl) Installed(ctx context.Context, kubeconfig []byte) ([]Install
 }
 
 func (c Clusterctl) Init(ctx context.Context, kubeconfig []byte, w Wanted) error {
-	// The library takes a kubeconfig path; it lives only for this call.
-	dir, err := os.MkdirTemp("", "selfhostctl-")
+	path, done, err := kubeconfigFile(kubeconfig)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = os.RemoveAll(dir) }()
-	path := filepath.Join(dir, "kubeconfig")
-	if err := os.WriteFile(path, kubeconfig, 0o600); err != nil {
-		return err
-	}
-
+	defer done()
 	cc, err := c.client(ctx, w)
 	if err != nil {
 		return err
@@ -87,6 +81,63 @@ func (c Clusterctl) Init(ctx context.Context, kubeconfig []byte, w Wanted) error
 	}
 	if _, err := cc.Init(ctx, opts); err != nil {
 		return fmt.Errorf("clusterctl init: %w", err)
+	}
+	return c.annotate(ctx, kubeconfig, Fingerprint(w.Variables))
+}
+
+// kubeconfigFile writes kubeconfig to a private file for the library, which takes a
+// path; done removes it.
+func kubeconfigFile(kubeconfig []byte) (path string, done func(), err error) {
+	dir, err := os.MkdirTemp("", "selfhostctl-")
+	if err != nil {
+		return "", nil, err
+	}
+	done = func() { _ = os.RemoveAll(dir) }
+	path = filepath.Join(dir, "kubeconfig")
+	if err := os.WriteFile(path, kubeconfig, 0o600); err != nil {
+		done()
+		return "", nil, err
+	}
+	return path, done, nil
+}
+
+// Upgrade runs clusterctl's upgrade for the steps alone, each at its version, with w's
+// variables; clusterctl also brings cert-manager to the version it ships. Then every
+// provider is stamped with w's fingerprint.
+func (c Clusterctl) Upgrade(ctx context.Context, kubeconfig []byte, w Wanted, steps []Step) error {
+	path, done, err := kubeconfigFile(kubeconfig)
+	if err != nil {
+		return err
+	}
+	defer done()
+	cc, err := c.client(ctx, w)
+	if err != nil {
+		return err
+	}
+	opts := clusterctlclient.ApplyUpgradeOptions{
+		Kubeconfig:          clusterctlclient.Kubeconfig{Path: path},
+		WaitProviders:       true,
+		WaitProviderTimeout: c.WaitTimeout,
+	}
+	for _, s := range steps {
+		ref := s.Name + ":" + s.Version
+		switch s.Type {
+		case clusterctlv1.CoreProviderType:
+			opts.CoreProvider = ref
+		case clusterctlv1.BootstrapProviderType:
+			opts.BootstrapProviders = append(opts.BootstrapProviders, ref)
+		case clusterctlv1.ControlPlaneProviderType:
+			opts.ControlPlaneProviders = append(opts.ControlPlaneProviders, ref)
+		case clusterctlv1.InfrastructureProviderType:
+			opts.InfrastructureProviders = append(opts.InfrastructureProviders, ref)
+		case clusterctlv1.IPAMProviderType:
+			opts.IPAMProviders = append(opts.IPAMProviders, ref)
+		case clusterctlv1.AddonProviderType:
+			opts.AddonProviders = append(opts.AddonProviders, ref)
+		}
+	}
+	if err := cc.ApplyUpgrade(ctx, opts); err != nil {
+		return fmt.Errorf("clusterctl upgrade: %w", err)
 	}
 	return c.annotate(ctx, kubeconfig, Fingerprint(w.Variables))
 }
