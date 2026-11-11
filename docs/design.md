@@ -141,7 +141,7 @@ Agreed 2026-11-09, for #11 and #12. Profile `k0smotron-kine`.
 | a Recovery is in progress | done |
 | anything else, e.g. the Management cluster answers | blocked: nothing to recover |
 
-**Phases (#11):** `outage`, `datastore`, `bootstrap-cluster`, `host`, `providers`, `before-apply`, `break-glass`, `webhooks`, `suspend-gitops`, `pause-children`, `delete-nodes`, `move-to-bootstrap`, `delete-break-glass`. Every phase from `break-glass` to `delete-nodes` is done ("moved") once the Bootstrap cluster holds the objects.
+**Phases (#11):** `outage`, `datastore`, `bootstrap-cluster`, `host`, `providers`, `before-apply`, `break-glass`, `infrastructure-gone`, `webhooks`, `suspend-gitops`, `pause-children`, `delete-nodes`, `move-to-bootstrap`, `delete-break-glass`. Every phase from `break-glass` to `delete-nodes` is done ("moved") once the Bootstrap cluster holds the objects.
 
 **Phases (#12), in the same `recover`:** `infrastructure`, `replace-machines`, `ready`, `move-to-management`, `restore-webhooks`, `leftovers`, `resume-gitops`, `unpause-children`, `delete-bootstrap-cluster`. The first three are done ("moved back") once the objects are in, or on their way to, the Management cluster. A Recovery ends when the Bootstrap cluster goes; `recover` then finds nothing to recover.
 
@@ -154,8 +154,8 @@ Agreed 2026-11-09, for #11 and #12. Profile `k0smotron-kine`.
 | Clock | none: revisions, not timestamps |
 | Datastore | Postgres only (`postgres://`, `postgresql://`); another one → the phase fails. Read with the same data source as the Break-glass controller, so it must resolve from the operator's host too |
 | Once started | done while a Recovery is in progress: the Break-glass controller writes to it itself |
-| Limit | machines cut off from the datastore, but not from the operator, write nothing and pass the gate. Their control plane is down (no API, controllers lose their leader leases), but the VMs still run: once the network returns, they run next to the machines `recover` replaces (#12), and their kubelets register again. Only an infrastructure check covers this (#13) |
-| Not chosen | the leases, read through the Break-glass controller (it runs on a live datastore before the proof); a confirmation flag per run, or the operator's monitoring alone (both see from the operator's side of a cut-off); an infrastructure check (not generic; an Infrastructure adapter may add one, #13) |
+| Limit | machines cut off from the datastore, but not from the operator, write nothing and pass the gate. Their control plane is down (no API, controllers lose their leader leases), but the VMs still run: once the network returns, they run next to the machines `recover` replaces (#12), and their kubelets register again. Only an Infrastructure adapter's check covers this: `infrastructure-gone` (capmox, #13); with `none`, nothing does |
+| Not chosen | the leases, read through the Break-glass controller (it runs on a live datastore before the proof); a confirmation flag per run, or the operator's monitoring alone (both see from the operator's side of a cut-off); an infrastructure check in the gate itself (not generic: the adapter's comes after the Break-glass controller, which holds the machines' objects) |
 
 | Decision | Choice |
 | --- | --- |
@@ -185,7 +185,7 @@ Agreed 2026-11-09, for #11 and #12. Profile `k0smotron-kine`.
 
 | Decision | Choice |
 | --- | --- |
-| Infrastructure adapter | `infrastructure.adapter`, optional: `none` (the default, which CAPD needs) does nothing. Like a phase: Status and Run on the old Machines, before they are deleted; blocked blocks `recover`. #13 adds `capmox` and an outage check |
+| Infrastructure adapter | `infrastructure.adapter`, optional: `none` (the default, which CAPD needs) does nothing. Asked twice: `infrastructure-gone` (a gate, through the Break-glass controller, before anything moves) and `infrastructure` (like a phase: Status and Run on the old Machines, before they are deleted). Blocked blocks `recover` |
 | Old Machines | the Cluster's Machines when `replace-machines` first runs, recorded by name in the recovery ConfigMap (key `machines.json`). Only those are deleted: a re-run never touches the new ones |
 | Deleting them | control plane and workers at once: the annotations above, `pre-terminate.delete.hook.machine.cluster.x-k8s.io/kcp-cleanup` removed, then deleted, waited for (10 min) |
 | Other lifecycle hooks | any other `pre-drain.delete.hook…` or `pre-terminate.delete.hook…` on an old Machine blocks, naming it, before any Machine is deleted: its owner's cleanup is the operator's call. Not chosen: removing every hook (an unknown owner's cleanup would be skipped silently) |
@@ -196,4 +196,24 @@ Agreed 2026-11-09, for #11 and #12. Profile `k0smotron-kine`.
 | GitOps | through the seam: what `suspend-gitops` marked, resumed, the root last |
 | Children | each one `pause-children` marked, unpaused (marker removed) once the Management cluster is healthy (as for `delete-bootstrap-cluster`) and the child's API, through Cluster API's Secret `<name>-kubeconfig`, answers with every Node Ready. One that doesn't stays paused: blocked after 10 min, a re-run tries again |
 | Bootstrap cluster | deleted under the pivot's stability conditions (#9) |
+
+**Adapter `capmox` (#13).** Researched against CAPMOX v0.9.2-kl.1:
+
+| Fact | Consequence |
+| --- | --- |
+| A failure domain is a zone (`ProxmoxCluster.spec.zoneConfig[]`, each with `nodes[]`), not a Proxmox node. CAPMOX builds `status.failureDomains` from them once the ProxmoxCluster's IPAM is ready; a Machine created before that lands in the default zone | with zones, `infrastructure` waits for the Cluster's failure domains (10 min) |
+| Deleting a VM, CAPMOX asks one node first: `status.proxmoxNode`, else the node it cloned from. Unreachable → the deletion hangs. Then it checks the VMID cluster-wide: free → done | `infrastructure` points an old ProxmoxMachine whose node is unset or not online at the first online node; one already online is kept |
+| A moved ProxmoxMachine with a VMID is never cloned again. If Proxmox still has the VM, on any node, CAPMOX takes it over and starts it | `infrastructure-gone` blocks while any old VM exists, running or not: start them, or destroy them to recover |
+| Proxmox reuses a freed VMID | an old VMID held by a VM with another name blocks too: CAPMOX would take it over and delete it |
+| CAPMOX's credentials: the Secret in `spec.credentialsRef` (`url`, `token`, `secret`, `insecure`, `root_ca`), which moves with the cluster. `insecure` unset means CAPMOX doesn't check the certificate | the adapter reads Proxmox with that Secret: no environment variables |
+
+| Decision | Choice |
+| --- | --- |
+| Config | `infrastructure: {adapter: capmox}`, nothing else |
+| Proxmox API | GETs only (`cluster/resources?type=vm`, `nodes`), with a plain HTTP client. Deleting VMs stays CAPMOX's job. The token is CAPMOX's own, which may destroy VMs, and it now leaves the operator's host |
+| TLS | the certificate is checked (system roots plus `root_ca`) unless `insecure` is explicitly true-ish. Unlike CAPMOX, unset means checked: the token crosses the operator's network. A failed check blocks: add `root_ca`, or set `insecure: "true"` knowingly |
+| Blocked | no `credentialsRef`, its Secret missing or incomplete, the API not answering, no node online, or an old VM still there |
+| Skipped | ProxmoxMachines without `virtualMachineID`: they never had a VM |
+| Tests | against a fake Proxmox API; no e2e (CI has no Proxmox). The first real run is a planned exercise on a real cluster |
+| Not chosen | a separate read-only token from the environment (more config for a rare run; the certificate check covers interception); CAPMOX's TLS rule (unset = unchecked); the node of the Machine's failure domain (a zone has several nodes, and the dead one may be among them); an outage check in `datastore` (it runs before the machines' objects are readable) |
 

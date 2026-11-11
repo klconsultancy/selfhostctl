@@ -71,7 +71,8 @@ type Cluster struct {
 	Kubeconfig string `json:"kubeconfig,omitempty"`
 }
 
-// Infrastructure names the Infrastructure adapter: none, the default, does nothing.
+// Infrastructure names the Infrastructure adapter: none, the default, does nothing;
+// capmox readies Proxmox VMs (docs/design.md#recovery).
 type Infrastructure struct {
 	Adapter string `json:"adapter,omitempty"`
 }
@@ -85,8 +86,8 @@ func (i *Infrastructure) AdapterName() string {
 }
 
 func (i *Infrastructure) validate() []string {
-	if n := i.AdapterName(); n != "none" {
-		return []string{fmt.Sprintf("infrastructure.adapter: %q: the adapters are none", n)}
+	if n := i.AdapterName(); n != "none" && n != "capmox" {
+		return []string{fmt.Sprintf("infrastructure.adapter: %q: the adapters are none, capmox", n)}
 	}
 	return nil
 }
