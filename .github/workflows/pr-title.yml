@@ -1,19 +1,18 @@
 name: PR title
 
-# The title becomes the squashed commit on main, from which release-please derives the
-# next version and the changelog.
+# The title becomes the squash commit on main, from which release-please derives the next
+# version and the changelog. The check is the shared one in klconsultancy/workflows; it
+# runs on pull_request, not pull_request_target, which GitHub blocks by default in public
+# repositories.
 on:
-  pull_request_target:
+  pull_request:
     types: [opened, edited, synchronize, reopened]
 
-permissions:
-  pull-requests: read
+permissions: {}
 
 jobs:
-  conventional-commit:
-    name: Conventional commit title
-    runs-on: ubuntu-latest
-    steps:
-      - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  title:
+    name: PR title
+    permissions:
+      pull-requests: read
+    uses: klconsultancy/workflows/.github/workflows/pr-title.yml@78f13c92a7d630ff602a5497ed6bbe6e68e2dd0e # main
