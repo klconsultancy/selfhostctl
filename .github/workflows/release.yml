@@ -16,13 +16,13 @@ on:
 permissions: {}
 
 jobs:
-  # release-please itself, as the GitHub App, in the shared workflow. It leaves release
-  # candidates alone (release-candidates is off): their pre-release is created below,
-  # once the build has succeeded, with what it built.
+  # release-please itself, as the GitHub App, in the shared workflow. It checks a release
+  # candidate's tag (release_candidate) but creates no pre-release (create-prerelease is
+  # off): that is created below, once the build has succeeded, with what it built.
   release-please:
     name: Release
     permissions: {} # it acts as the app
-    uses: klconsultancy/workflows/.github/workflows/release-please.yml@c9502596494c47704b890d5cc66de73c06ba93d8 # main
+    uses: klconsultancy/workflows/.github/workflows/release-please.yml@5488c03eb4249425edfe6a692185ab73fa748df3 # main
     with:
       app-client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
     secrets:
@@ -30,8 +30,9 @@ jobs:
 
   binaries:
     needs: release-please
-    # always(): on a release candidate's tag, release-please's job is skipped.
-    if: always() && (needs.release-please.outputs.release_created == 'true' || github.ref_type == 'tag')
+    # always(): on a release candidate's tag, release-please's job is skipped. A tag is
+    # built only when the call checked it as a release candidate of the pending release.
+    if: always() && (needs.release-please.outputs.release_created == 'true' || needs.release-please.outputs.release_candidate == 'true')
     runs-on: ubuntu-latest
     env:
       TAG: ${{ needs.release-please.outputs.tag_name || github.ref_name }}
