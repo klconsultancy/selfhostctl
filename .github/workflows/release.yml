@@ -16,29 +16,21 @@ on:
 permissions: {}
 
 jobs:
+  # release-please itself, as the GitHub App, in the shared workflow. It leaves release
+  # candidates alone (release-candidates is off): their pre-release is created below,
+  # once the build has succeeded, with what it built.
   release-please:
-    name: Release PR
-    if: github.ref_type == 'branch'
-    runs-on: ubuntu-latest
-    outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
-    steps:
-      # A GitHub App token instead of GITHUB_TOKEN, so CI runs on the release PR. The
-      # app may also create the version tags the "release tags" ruleset protects.
-      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
-        id: app-token
-        with:
-          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
-          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
-        id: release
-        with:
-          token: ${{ steps.app-token.outputs.token }}
+    name: Release
+    permissions: {} # it acts as the app
+    uses: klconsultancy/workflows/.github/workflows/release-please.yml@c9502596494c47704b890d5cc66de73c06ba93d8 # main
+    with:
+      app-client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+    secrets:
+      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
 
   binaries:
     needs: release-please
-    # always(): on a release candidate's tag, release-please is skipped.
+    # always(): on a release candidate's tag, release-please's job is skipped.
     if: always() && (needs.release-please.outputs.release_created == 'true' || github.ref_type == 'tag')
     runs-on: ubuntu-latest
     env:
