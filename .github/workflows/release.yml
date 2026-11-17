@@ -47,6 +47,9 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          # No module or build cache for a release: a cache written by another workflow
+          # run (a pull request's, say) must not end up in the binaries.
+          cache: false
       - run: scripts/build.sh "$TAG"
       # A signed build provenance attestation of each binary, checked with
       # `gh attestation verify`.
