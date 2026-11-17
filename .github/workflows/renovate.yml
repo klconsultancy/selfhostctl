@@ -17,7 +17,7 @@ jobs:
     name: Renovate
     permissions:
       contents: read
-    uses: klconsultancy/workflows/.github/workflows/renovate.yml@c9502596494c47704b890d5cc66de73c06ba93d8 # main
+    uses: klconsultancy/workflows/.github/workflows/renovate.yml@e6939b6be36b833baf87de0ce25c0ff4cac96b2f # v1.0.0
     with:
       app-client-id: ${{ vars.RENOVATE_APP_CLIENT_ID }}
     secrets:

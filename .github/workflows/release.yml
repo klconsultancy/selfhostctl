@@ -22,7 +22,7 @@ jobs:
   release-please:
     name: Release
     permissions: {} # it acts as the app
-    uses: klconsultancy/workflows/.github/workflows/release-please.yml@5488c03eb4249425edfe6a692185ab73fa748df3 # main
+    uses: klconsultancy/workflows/.github/workflows/release-please.yml@e6939b6be36b833baf87de0ce25c0ff4cac96b2f # v1.0.0
     with:
       app-client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
     secrets:
