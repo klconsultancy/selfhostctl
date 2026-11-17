@@ -15,4 +15,4 @@ jobs:
     name: PR title
     permissions:
       pull-requests: read
-    uses: klconsultancy/workflows/.github/workflows/pr-title.yml@c9502596494c47704b890d5cc66de73c06ba93d8 # main
+    uses: klconsultancy/workflows/.github/workflows/pr-title.yml@e6939b6be36b833baf87de0ce25c0ff4cac96b2f # v1.0.0
